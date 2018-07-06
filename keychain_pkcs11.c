@@ -13,10 +13,98 @@
 #include "mypkcs11.h"
 #include "debug.h"
 
+/*
+ * Handling PKCS11 locking.  If we can use native locking with pthreads
+ * (CKF_OS_LOCKING_OK) then we do that.  Otherwise we use the API-suppled
+ * mutex calls.
+ */
+
+typedef union {
+	pthread_mutex_t pt;
+	void * ck;
+} kc_mutex;
+
+static int use_mutex = 0;
+static CK_RV (*createmutex)(CK_VOID_PTR_PTR) = NULL;
+static CK_RV (*destroymutex)(CK_VOID_PTR) = NULL;
+static CK_RV (*lockmutex)(CK_VOID_PTR) = NULL;
+static CK_RV (*unlockmutex)(CK_VOID_PTR) = NULL;
+#define CREATE_MUTEX(mutex) \
+do { \
+	int rc; \
+	if (use_mutex) { \
+		if (createmutex) { \
+			rc = (*createmutex)(&mutex.ck); \
+		} else { \
+			rc = pthread_mutex_init(&mutex.pt, NULL); \
+		} \
+		if (rc) { \
+			os_log_debug(logsys, "create_mutex returned %d", rc); \
+		} \
+	} \
+} while (0)
+#define DESTROY_MUTEX(mutex) \
+do { \
+	int rc; \
+	if (use_mutex) { \
+		if (destroymutex) { \
+			rc = (*destroymutex)(&mutex.ck); \
+		} else { \
+			rc = pthread_mutex_destroy(&mutex.pt, NULL); \
+		} \
+		if (rc) { \
+			os_log_debug(logsys, "destroy_mutex returned %d", rc); \
+		} \
+	} \
+} while (0)
+#define LOCK_MUTEX(mutex) \
+do { \
+	int rc; \
+	if (use_mutex) { \
+		if (lockmutex) { \
+			rc = (*lockmutex)(&mutex.ck); \
+		} else { \
+			rc = pthread_mutex_lock(&mutex.pt); \
+		} \
+		if (rc) { \
+			os_log_debug(logsys, "lock_mutex returned %d", rc); \
+		} \
+	} \
+} while (0)
+#define UNLOCK_MUTEX(mutex) \
+do { \
+	int rc; \
+	if (use_mutex) { \
+		if (unlockmutex) { \
+			rc = (*unlockmutex)(&mutex.ck); \
+		} else { \
+			rc = pthread_mutex_unlock(&mutex.pt, NULL); \
+		} \
+		if (rc) { \
+			os_log_debug(logsys, "unlock_mutex returned %d", rc); \
+		} \
+	} \
+} while (0)
+
+
+static kc_mutex slot_mutex;
+/*
+ * Stuff required for logging; we're using the MacOS X native os_log
+ * facility.  To get logs out of this, see log(1).  Specifically, if you
+ * want debugging logs, try:
+ *
+ * log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
+ */
+
 static void log_init(void);
 static os_log_t logsys;
 static pthread_once_t loginit = PTHREAD_ONCE_INIT;
 #define LOGINIT() pthread_once(&loginit, log_init)
+
+/*
+ * Declarations for our list of exported PKCS11 functions that we return
+ * using C_GetFunctionList()
+ */
 
 static CK_FUNCTION_LIST function_list = {
 	{ 2, 40 },	/* We support 2.40 of PKCS#11 */
@@ -59,7 +147,45 @@ CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR pPtr)
  * These are in PKCS11 order, to make searching easier
  */
 
-NOTSUPPORTED(C_Initialize, (CK_VOID_PTR p))
+CK_RV C_Initialize(CK_VOID_PTR p)
+{
+	CK_C_INITIALIZE_ARGS_PTR init = (CK_C_INITIALIZE_ARGS_PTR) p;
+
+	LOGINIT();
+	os_log_debug(logsys, "C_Initialize called");
+
+	if (init) {
+		if (init->pReserved) {
+			os_log_debug(logsys, "pReserved set, returning");
+			return CKR_ARGUMENTS_BAD;
+		}
+		if (init->flags & CKF_OS_LOCKING_OK) {
+			use_mutex = 1;
+			os_log_debug(logsys, "OS_LOCKING_OK set, using "
+				     "pthread locking");
+		} else if (init->CreateMutex || init->DestroyMutex ||
+			   init->LockMutex || init->UnlockMutex) {
+			use_mutex = 1;
+			createmutex = init->CreateMutex;
+			destroymutex = init->DestroyMutex;
+			lockmutex = init->LockMutex;
+			unlockmutex = init->UnlockMutex;
+			os_log_debug(logsys, "Using caller-supplied locking "
+				     "functions");
+		} else {
+			use_mutex = 0;
+			os_log_debug(logsys, "Not performing any locking");
+		}
+	} else {
+		os_log_debug(logsys, "init was set to NULL");
+	}
+
+	if (use_mutex)
+		CREATE_MUTEX(slot_mutex);
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_Finalize, (CK_VOID_PTR p))
 NOTSUPPORTED(C_GetInfo, (CK_INFO_PTR p))
 /* C_GetFunctionList declared above */
