@@ -13,6 +13,11 @@
 #include "mypkcs11.h"
 #include "debug.h"
 
+/* We currently support 2.40 of Cryptoki */
+
+#define CK_MAJOR_VERSION 2
+#define CK_MINOR_VERSION 40
+
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
  * (CKF_OS_LOCKING_OK) then we do that.  Otherwise we use the API-suppled
@@ -29,6 +34,7 @@ static CK_RV (*createmutex)(CK_VOID_PTR_PTR) = NULL;
 static CK_RV (*destroymutex)(CK_VOID_PTR) = NULL;
 static CK_RV (*lockmutex)(CK_VOID_PTR) = NULL;
 static CK_RV (*unlockmutex)(CK_VOID_PTR) = NULL;
+
 #define CREATE_MUTEX(mutex) \
 do { \
 	int rc; \
@@ -43,6 +49,7 @@ do { \
 		} \
 	} \
 } while (0)
+
 #define DESTROY_MUTEX(mutex) \
 do { \
 	int rc; \
@@ -50,13 +57,14 @@ do { \
 		if (destroymutex) { \
 			rc = (*destroymutex)(&mutex.ck); \
 		} else { \
-			rc = pthread_mutex_destroy(&mutex.pt, NULL); \
+			rc = pthread_mutex_destroy(&mutex.pt); \
 		} \
 		if (rc) { \
 			os_log_debug(logsys, "destroy_mutex returned %d", rc); \
 		} \
 	} \
 } while (0)
+
 #define LOCK_MUTEX(mutex) \
 do { \
 	int rc; \
@@ -71,6 +79,7 @@ do { \
 		} \
 	} \
 } while (0)
+
 #define UNLOCK_MUTEX(mutex) \
 do { \
 	int rc; \
@@ -99,7 +108,6 @@ static kc_mutex slot_mutex;
 static void log_init(void);
 static os_log_t logsys;
 static pthread_once_t loginit = PTHREAD_ONCE_INIT;
-#define LOGINIT() pthread_once(&loginit, log_init)
 
 /*
  * Declarations for our list of exported PKCS11 functions that we return
@@ -107,7 +115,7 @@ static pthread_once_t loginit = PTHREAD_ONCE_INIT;
  */
 
 static CK_FUNCTION_LIST function_list = {
-	{ 2, 40 },	/* We support 2.40 of PKCS#11 */
+	{ CK_MAJOR_VERSION, CK_MINOR_VERSION },
 	/* This seems strange to me, but I guess it's what everyone else does */
 #undef CK_PKCS11_FUNCTION_INFO
 #define CK_PKCS11_FUNCTION_INFO(name) name ,
@@ -115,12 +123,29 @@ static CK_FUNCTION_LIST function_list = {
 };
 #undef CK_PKCS11_FUNCTION_INFO
 
+#define FUNCINIT(func) \
+do { \
+	pthread_once(&loginit, log_init); \
+	os_log_debug(logsys, #func " called"); \
+} while (0)
+
+#define FUNCINITCHK(func) \
+	FUNCINIT(func); \
+do { \
+	if (! initialized) { \
+		os_log_debug(logsys, #func " returning NOT_INITIALIZED"); \
+		return CKR_CRYPTOKI_NOT_INITIALIZED; \
+	} \
+} while (0)
+
 #define NOTSUPPORTED(name, args) \
 CK_RV name args { \
-	LOGINIT(); \
-	os_log_debug(logsys, "Function " #name " called (NOT SUPPORTED!)"); \
+	FUNCINITCHK(name); \
+	os_log_debug(logsys, "Function " #name " returning NOT SUPPORTED!"); \
 	return CKR_FUNCTION_NOT_SUPPORTED; \
 }
+
+static int initialized = 0;
 
 /*
  * Our implementation of C_GetFunctionList(), which just returns a pointer
@@ -129,7 +154,7 @@ CK_RV name args { \
 
 CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR pPtr)
 {
-	LOGINIT();
+	FUNCINIT(C_GetFunctionList);
 
 	if (! pPtr) {
 		os_log_debug(logsys, "C_GetFunctionList called (bad arguments)");
@@ -151,8 +176,12 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 {
 	CK_C_INITIALIZE_ARGS_PTR init = (CK_C_INITIALIZE_ARGS_PTR) p;
 
-	LOGINIT();
-	os_log_debug(logsys, "C_Initialize called");
+	FUNCINIT(C_Initialize);
+
+	if (initialized) {
+		os_log_debug(logsys, "Library is already initialized!");
+		return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+	}
 
 	if (init) {
 		if (init->pReserved) {
@@ -180,14 +209,58 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		os_log_debug(logsys, "init was set to NULL");
 	}
 
-	if (use_mutex)
-		CREATE_MUTEX(slot_mutex);
+	CREATE_MUTEX(slot_mutex);
+
+	initialized = 1;
 
 	return CKR_OK;
 }
 
-NOTSUPPORTED(C_Finalize, (CK_VOID_PTR p))
-NOTSUPPORTED(C_GetInfo, (CK_INFO_PTR p))
+CK_RV C_Finalize(CK_VOID_PTR p)
+{
+	FUNCINITCHK(C_Finalize);
+
+	if (p) {
+		os_log_debug(logsys, "pReserved is non-NULL");
+		return CKR_ARGUMENTS_BAD;
+	}
+
+	DESTROY_MUTEX(slot_mutex);
+
+	use_mutex = 0;
+	initialized = 0;
+
+	return CKR_OK;
+}
+
+CK_RV C_GetInfo(CK_INFO_PTR p)
+{
+	FUNCINITCHK(C_GetInfo);
+
+	if (p->flags != 0) {
+		os_log_debug(logsys, "flags is nonzero!");
+		return CKR_ARGUMENTS_BAD;
+	}
+
+	p->cryptokiVersion.major = CK_MAJOR_VERSION;
+	p->cryptokiVersion.minor = CK_MINOR_VERSION;
+
+	snprintf((char *) p->manufacturerID, sizeof(p->manufacturerID), "%*s",
+		 (int) - sizeof(p->manufacturerID),
+		 "US Naval Research Lab");
+	p->manufacturerID[sizeof(p->manufacturerID) - 1] = ' ';
+
+	snprintf((char *) p->libraryDescription, sizeof(p->libraryDescription), "%*s",
+		 (int) - sizeof(p->libraryDescription),
+		 "Keychain PKCS#11 Bridge Library");
+	p->libraryDescription[sizeof(p->libraryDescription) - 1] = ' ';
+
+	p->libraryVersion.major = 1;
+	p->libraryVersion.minor = 0;
+
+	return CKR_OK;
+}
+
 /* C_GetFunctionList declared above */
 NOTSUPPORTED(C_GetSlotList, (CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list, CK_ULONG_PTR slot_num))
 NOTSUPPORTED(C_GetSlotInfo, (CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info))
