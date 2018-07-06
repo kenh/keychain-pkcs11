@@ -29,9 +29,9 @@ int main(int argc, char *argv[]) {
     CK_FUNCTION_LIST_PTR p11p;
     CK_SLOT_ID slot;
     CK_SESSION_HANDLE hSession;
-    CK_UTF8CHAR pin[64];
-    CK_ULONG pinLen = sizeof(pin) - 1;
-    CK_BYTE label[32];
+    /* CK_UTF8CHAR pin[64]; */
+    /* CK_ULONG pinLen = sizeof(pin) - 1; */
+    /* CK_BYTE label[32]; */
 
     CK_INFO info;
     CK_SLOT_INFO sInfo;
@@ -60,13 +60,13 @@ int main(int argc, char *argv[]) {
         rv = load_library(argv[1], &p11p);
     }
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error loading library (rv = %X)\n", rv);
+        fprintf(stderr, "Error loading library (rv = %X)\n", (unsigned int) rv);
         return(1);
     }
 
     rv = p11p->C_Initialize(NULL);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error initalizing library (rv = %X)\n", rv);
+        fprintf(stderr, "Error initalizing library (rv = %X)\n", (unsigned int) rv);
         return(2);
     }
 
@@ -77,9 +77,9 @@ int main(int argc, char *argv[]) {
         printf("Lib manufacturer: %s\n", stringify(info.manufacturerID, 32));
         printf("Lib description: %s\n", stringify(info.libraryDescription,32));
         printf("Lib version: %d.%d\n", info.libraryVersion.major, info.libraryVersion.minor);
-        printf("Lib flags: %d\n", info.flags);
+        printf("Lib flags: %d\n", (int) info.flags);
     } else {
-        fprintf(stderr, "Unable to get info (rv = %X)\n", rv);
+        fprintf(stderr, "Unable to get info (rv = %X)\n", (unsigned int) rv);
     }
 
 
@@ -88,7 +88,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error getting Slot List\n");
         return(rv);
     }
-    printf("Found %d slots\n", numSlots);
+    printf("Found %d slots\n", (int) numSlots);
 
     slotList = (CK_SLOT_ID_PTR) malloc(sizeof(CK_SLOT_ID) * (numSlots + 1));
     if (!slotList) return(-1);
@@ -105,10 +105,10 @@ int main(int argc, char *argv[]) {
         rv = p11p->C_GetSlotInfo(slotList[i], &slotInfo);
         if (rv != CKR_OK) continue;
         if (!(slotInfo.flags & CKF_TOKEN_PRESENT)) {
-            fprintf(stderr,"Slot %d has no token present\n", slotList[i]);
+            fprintf(stderr,"Slot %d has no token present\n", (int) slotList[i]);
             continue;
         } else {
-            printf("Slot %d description: %s\n", slotList[i],  stringify(slotInfo.slotDescription, 64));
+            printf("Slot %d description: %s\n", (int) slotList[i],  stringify(slotInfo.slotDescription, 64));
         }
         validSlot = slotList[i];
     }
@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
         printf("Slot supports removeable tokens: %s\n", (sInfo.flags & CKF_REMOVABLE_DEVICE ? "yes" : "no"));
         printf("Slot is a hardware slot: %s\n", (sInfo.flags & CKF_HW_SLOT ? "yes" : "no"));
     } else {
-        fprintf(stderr, "Error getting slot info (rv = %X)\n", rv);
+        fprintf(stderr, "Error getting slot info (rv = %X)\n", (unsigned int) rv);
     }
 
     memset(&tInfo, 0, sizeof(tInfo));
@@ -153,17 +153,17 @@ int main(int argc, char *argv[]) {
         printf("Token Manufacturer: %s\n", stringify(tInfo.manufacturerID, 32));
         printf("Token Model: %s\n", stringify(tInfo.model,16));
         printf("Token Serial: %s\n", stringify(tInfo.serialNumber,16));
-        printf("Token flags = 0x%x (%d)\n", tInfo.flags, tInfo.flags);
-        printf("Token MaxSessionCount = %d\n", tInfo.ulMaxSessionCount);
-        printf("Token SessionCount = %d\n", tInfo.ulSessionCount);
-        printf("Token MaxRwSessionCount = %d\n", tInfo.ulMaxRwSessionCount);
-        printf("Token RwSessionCount = %d\n", tInfo.ulRwSessionCount);
-        printf("Token Max PIN len = %d\n", tInfo.ulMaxPinLen);
-        printf("Token Min PIN len = %d\n", tInfo.ulMinPinLen);
-        printf("Token total public mem = %d\n", tInfo.ulTotalPublicMemory);
-        printf("Token free public mem = %d\n", tInfo.ulFreePublicMemory);
-        printf("Token total private mem = %d\n", tInfo.ulTotalPrivateMemory);
-        printf("Token free private mem = %d\n", tInfo.ulFreePrivateMemory);
+        printf("Token flags = 0x%x (%d)\n", (unsigned int) tInfo.flags, (int) tInfo.flags);
+        printf("Token MaxSessionCount = %d\n", (int) tInfo.ulMaxSessionCount);
+        printf("Token SessionCount = %d\n", (int) tInfo.ulSessionCount);
+        printf("Token MaxRwSessionCount = %d\n", (int) tInfo.ulMaxRwSessionCount);
+        printf("Token RwSessionCount = %d\n", (int) tInfo.ulRwSessionCount);
+        printf("Token Max PIN len = %d\n", (int) tInfo.ulMaxPinLen);
+        printf("Token Min PIN len = %d\n", (int) tInfo.ulMinPinLen);
+        printf("Token total public mem = %d\n", (int) tInfo.ulTotalPublicMemory);
+        printf("Token free public mem = %d\n", (int) tInfo.ulFreePublicMemory);
+        printf("Token total private mem = %d\n", (int) tInfo.ulTotalPrivateMemory);
+        printf("Token free private mem = %d\n", (int) tInfo.ulFreePrivateMemory);
         printf("Token hardware version = %d.%d\n", tInfo.hardwareVersion.major,
                tInfo.hardwareVersion.minor);
         printf("Token firmware version = %d.%d\n", tInfo.firmwareVersion.major,
@@ -171,30 +171,30 @@ int main(int argc, char *argv[]) {
         printf("Token utcTime = %s\n", stringify(tInfo.utcTime, 16));
 
     } else {
-        fprintf(stderr, "Error getting token info (rv = %X)\n", rv);
+        fprintf(stderr, "Error getting token info (rv = %X)\n", (unsigned int) rv);
     }
 
     rv = p11p->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, &hSession);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error opening session (rv = %X)\n", rv);
+        fprintf(stderr, "Error opening session (rv = %X)\n", (unsigned int) rv);
         goto cleanup;
     }
 
     memset(&sessionInfo, 0, sizeof(sessionInfo));
     rv = p11p->C_GetSessionInfo(hSession, &sessionInfo);
     if (rv == CKR_OK) {
-        printf("Session slot: %d\n", sessionInfo.slotID);
-        printf("Session state: %d\n", sessionInfo.state);
-        printf("Session flags: %d\n", sessionInfo.flags);
-        printf("Session device errors: %d\n", sessionInfo.ulDeviceError);
+        printf("Session slot: %d\n", (int) sessionInfo.slotID);
+        printf("Session state: %d\n", (int) sessionInfo.state);
+        printf("Session flags: %d\n", (int) sessionInfo.flags);
+        printf("Session device errors: %d\n", (int) sessionInfo.ulDeviceError);
     } else {
-        fprintf(stderr, "Unable to get session info (rv = %X)\n", rv);
+        fprintf(stderr, "Unable to get session info (rv = %X)\n", (unsigned int) rv);
     }
 
 
     rv = login(p11p, hSession, 0, NULL, 0);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error logging into token (rv = %X)\n", rv);
+        fprintf(stderr, "Error logging into token (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
@@ -204,7 +204,7 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsInit(hSession, NULL, 0);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
@@ -215,14 +215,14 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
-    fprintf(stderr, "Found %d objects\n", count);
+    fprintf(stderr, "Found %d objects\n", (int) count);
 
     for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, phObject[i]);
+        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
 
         attrs[0].type = CKA_CLASS;
         attrs[0].pValue = &ulValue;
@@ -230,13 +230,13 @@ int main(int argc, char *argv[]) {
 
         rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
         if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", rv);
+            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
             (void)p11p->C_CloseSession(hSession);
             goto cleanup;
         }
 
 
-        fprintf(stderr, "  Class: 0x%X ", ulValue);
+        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
         switch(ulValue) {
             case CKO_DATA:
                 {
@@ -277,13 +277,13 @@ int main(int argc, char *argv[]) {
                 for(j=0;j<4;j++) {
                     rv = p11p->C_GetAttributeValue(hSession, phObject[i], &(attrs[j]), 1);
                     if(rv != CKR_OK) {
-                        fprintf(stderr, "Error getting object attributes for %d (rv = 0x%X)\n",j, rv);
+                        fprintf(stderr, "Error getting object attributes for %d (rv = 0x%X)\n",j, (unsigned int) rv);
 
                     }
                 }
 
 
-                fprintf(stderr, "    type: %d\n", certType);
+                fprintf(stderr, "    type: %d\n", (int) certType);
                 //fwrite(certData, attrs[3].ulValueLen, 1, stdout);
                 fprintf(stderr,"     keyId: %s\n", hexify(keyId,attrs[1].ulValueLen));
 
@@ -313,7 +313,7 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsFinal(hSession);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error finalizing Finding Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error finalizing Finding Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
@@ -332,34 +332,34 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsInit(hSession, attrs, 2);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
 
     rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
-    fprintf(stderr, "Found %d objects\n", count);
+    fprintf(stderr, "Found %d objects\n", (int) count);
 
     for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, phObject[i]);
+        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
         attrs[0].type = CKA_CLASS;
         attrs[0].pValue = &ulValue;
         attrs[0].ulValueLen = sizeof(CK_ULONG);
 
         rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
         if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", rv);
+            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
             (void)p11p->C_CloseSession(hSession);
             goto cleanup;
         }
 
 
-        fprintf(stderr, "  Class: 0x%X ", ulValue);
+        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
         switch(ulValue) {
             case CKA_TOKEN: fprintf(stderr, "CKA_TOKEN\n");
                 break;
@@ -388,34 +388,34 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsInit(hSession, attrs, 1);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
 
     rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", rv);
+        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
-    fprintf(stderr, "Found %d objects\n", count);
+    fprintf(stderr, "Found %d objects\n", (int) count);
 
     for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, phObject[i]);
+        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
         attrs[0].type = CKA_CLASS;
         attrs[0].pValue = &ulValue;
         attrs[0].ulValueLen = sizeof(CK_ULONG);
 
         rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
         if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", rv);
+            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
             (void)p11p->C_CloseSession(hSession);
             goto cleanup;
         }
 
 
-        fprintf(stderr, "  Class: 0x%X ", ulValue);
+        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
         switch(ulValue) {
             case CKA_TOKEN: fprintf(stderr, "CKA_TOKEN\n");
                 break;
@@ -440,7 +440,7 @@ int main(int argc, char *argv[]) {
 
     rv = login(p11p, hSession, 0, NULL, 0);
      if (rv != CKR_OK) {
-         fprintf(stderr, "Error logging into token (rv = %X)\n", rv);
+         fprintf(stderr, "Error logging into token (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
      }
@@ -518,7 +518,7 @@ CK_RV load_library(char *library, CK_FUNCTION_LIST_PTR *p11p) {
 
     rv = (*getflist)(p11p);
     if (rv != CKR_OK) {
-        printf("Error calling \"C_GetFunctionList\" (rv = %d)\n", rv);
+        printf("Error calling \"C_GetFunctionList\" (rv = %d)\n", (int) rv);
         return(rv);
     }
     return(CKR_OK);
