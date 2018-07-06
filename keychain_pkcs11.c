@@ -4,11 +4,19 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <os/log.h>
 
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "mypkcs11.h"
+#include "debug.h"
+
+static void log_init(void);
+static os_log_t logsys;
+static pthread_once_t loginit = PTHREAD_ONCE_INIT;
+#define LOGINIT() pthread_once(&loginit, log_init)
 
 static CK_FUNCTION_LIST function_list = {
 	{ 2, 40 },	/* We support 2.40 of PKCS#11 */
@@ -19,9 +27,10 @@ static CK_FUNCTION_LIST function_list = {
 };
 #undef CK_PKCS11_FUNCTION_INFO
 
-
 #define NOTSUPPORTED(name, args) \
 CK_RV name args { \
+	LOGINIT(); \
+	os_log_debug(logsys, "Function " #name " called (NOT SUPPORTED!)"); \
 	return CKR_FUNCTION_NOT_SUPPORTED; \
 }
 
@@ -32,10 +41,17 @@ CK_RV name args { \
 
 CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR pPtr)
 {
-	if (! pPtr)
+	LOGINIT();
+
+	if (! pPtr) {
+		os_log_debug(logsys, "C_GetFunctionList called (bad arguments)");
 		return CKR_ARGUMENTS_BAD;
+	}
 
 	*pPtr = &function_list;
+
+	os_log_debug(logsys, "C_GetFunctionList called (successful)");
+
 	return CKR_OK;
 }
 
@@ -111,3 +127,12 @@ NOTSUPPORTED(C_GenerateRandom, (CK_SESSION_HANDLE session, CK_BYTE_PTR randomdat
 NOTSUPPORTED(C_GetFunctionStatus, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_CancelFunction, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_WaitForSlotEvent, (CK_SESSION_HANDLE session, CK_SLOT_ID_PTR slot_id, CK_VOID_PTR reserved))
+
+/*
+ * Make sure the our custom logging system is enabled
+ */
+
+static void log_init(void)
+{
+	logsys = os_log_create("mil.navy.nrl.cmf.pkcs11", "general");
+}

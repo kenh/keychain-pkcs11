@@ -8,6 +8,8 @@
 ## Search for Autoconf macros here
 ACLOCAL_AMFLAGS = -I m4
 
+AM_CFLAGS = -Wall
+
 lib_LTLIBRARIES = keychain-pkcs11.la
 check_PROGRAMS = pkcs11_test
 
@@ -20,6 +22,6 @@ keychain_pkcs11_la_SOURCES = \
 			pkcs11t.h \
 			#
 
-keychain_pkcs11_la_LDFLAGS = -module
+keychain_pkcs11_la_LDFLAGS = -module -avoid-version -export-symbols-regex '^C_'
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h
