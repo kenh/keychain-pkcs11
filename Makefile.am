@@ -22,6 +22,6 @@ keychain_pkcs11_la_SOURCES = \
 			pkcs11t.h \
 			#
 
-keychain_pkcs11_la_LDFLAGS = -module -avoid-version -export-symbols-regex '^C_'
+keychain_pkcs11_la_LDFLAGS = -module -avoid-version -export-symbols-regex '^C_' -framework Security
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h

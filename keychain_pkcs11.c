@@ -262,7 +262,69 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 }
 
 /* C_GetFunctionList declared above */
-NOTSUPPORTED(C_GetSlotList, (CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list, CK_ULONG_PTR slot_num))
+
+CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
+		    CK_ULONG_PTR slot_num)
+{
+	CFDictionaryRef query;
+	CFArrayRef result;
+	OSStatus ret;
+
+	/*
+	 * Our keys to create our query dictionary; note that the order
+	 * keys and values need to match up
+	 */
+
+	const void * keys[] = {
+		kSecClass, kSecMatchLimit,
+		kSecReturnRef, kSecAttrCanSign,
+	};
+	const void * values[] = {
+		kSecClassIdentity, kSecMatchLimitAll, kCFBooleanTrue,
+		kCFBooleanTrue,
+	};
+
+	FUNCINITCHK(C_GetSlotList);
+
+	os_log_debug(logsys, "tokens_present = %{bool}d, slot_list = %p, "
+		     "slot_num = %d", token_present, slot_list,
+		     (int) *slot_num);
+
+	/*
+	 * Build a dictionary up to get return values from SecItemCopyMatching()
+	 */
+
+	query = CFDictionaryCreate(NULL, keys, values,
+				  sizeof(keys)/sizeof(keys[0]),
+				  &kCFTypeDictionaryKeyCallBacks,
+				  &kCFTypeDictionaryValueCallBacks);
+
+	if (query == NULL) {
+		os_log_debug(logsys, "query dictionary creation returned NULL");
+		return CKR_FUNCTION_FAILED;
+	}
+
+	ret = SecItemCopyMatching(query, (CFTypeRef *) &result);
+
+	CFRelease(query);
+
+	if (ret) {
+		CFStringRef errmsg = SecCopyErrorMessageString(ret, NULL);
+
+		os_log_debug(logsys, "SecItemCopyMatching failed: %@", errmsg);
+
+		CFRelease(errmsg);
+
+		return CKR_FUNCTION_FAILED;
+	}
+
+	os_log_debug(logsys, "SecItemCopyMatching returned %{public}@", result);
+
+	CFRelease(result);
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_GetSlotInfo, (CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info))
 NOTSUPPORTED(C_GetTokenInfo, (CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info))
 NOTSUPPORTED(C_GetMechanismList, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist, CK_ULONG_PTR mechnum))
