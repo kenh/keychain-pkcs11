@@ -22,10 +22,11 @@ keychain_pkcs11_la_SOURCES = \
 			pkcs11t.h \
 			#
 
-keychain_pkcs11_la_LDFLAGS = -module -avoid-version -export-symbols-regex '^C_' -framework Security
+keychain_pkcs11_la_LDFLAGS = \
+			-module \
+			-avoid-version \
+			-export-symbols-regex '^C_' \
+			-framework Security \
+			#
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h
-
-.PHONY: adebug
-adebug: pkcs11_test
-	cp pkcs11_test /tmp/ssh-pkcs11-helper

@@ -12,6 +12,7 @@
 
 #include "mypkcs11.h"
 #include "debug.h"
+#include "config.h"
 
 /* We currently support 2.40 of Cryptoki */
 

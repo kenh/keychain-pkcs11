@@ -7,6 +7,8 @@
 /autom4te.cache/
 /compile
 /config.guess
+/config.h
+/config.h.in
 /config.log
 /config.status
 /config.sub
@@ -15,6 +17,7 @@
 /install-sh
 /libtool
 /missing
+/stamp-h1
 # Generated/used by libtool
 /ltmain.sh
 /m4/libtool.m4

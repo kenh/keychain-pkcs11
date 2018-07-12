@@ -21,6 +21,7 @@
  */
 
 #include "pkcs11_test.h"
+#include "config.h"
 
 
 
@@ -54,6 +55,25 @@ int main(int argc, char *argv[]) {
 
 
     int i;
+
+    while ((i = getopt(argc, argv, "s:")) != -1) {
+	switch (i) {
+	case 's':
+#ifdef HAVE_SETPROGNAME
+	    setprogname(optarg);
+#endif /* HAVE_SETPROGNAME */
+	    break;
+	case '?':
+	default:
+	    fprintf(stderr, "Usage: %s [-s progname] [pkcs11_library]\n",
+		    argv[0]);
+	    exit(1);
+	}
+    }
+
+    argc -= optind - 1;
+    argv += optind - 1;
+
     if(argc == 1) {
         rv = load_library("keychain_pkcs11.dylib", &p11p);
     } else {
@@ -464,7 +484,8 @@ int main(int argc, char *argv[]) {
      }
 
 
-    p11p->C_Logout(hSession);
+    if (p11p->C_Logout)
+	p11p->C_Logout(hSession);
     (void)p11p->C_CloseSession(hSession);
 cleanup:
     if (p11p) p11p->C_Finalize(0);

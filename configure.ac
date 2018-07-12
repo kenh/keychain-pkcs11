@@ -15,5 +15,8 @@ AM_PROG_AR
 LT_PREREQ([2.4.6])
 LT_INIT([disable-static dlopen])
 
+AC_CHECK_FUNCS([setprogname])
+
 AC_CONFIG_FILES([Makefile])
+AC_CONFIG_HEADER([config.h])
 AC_OUTPUT
