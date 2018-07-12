@@ -102,6 +102,10 @@ int main(int argc, char *argv[]) {
 
     for (i=0; i < numSlots; i++) {
         memset(&slotInfo, 0, sizeof(slotInfo));
+	if (! p11p->C_GetSlotInfo) {
+	    fprintf(stderr, "C_GetSlotInfo is NULL, continuing ...\n");
+	    continue;
+	}
         rv = p11p->C_GetSlotInfo(slotList[i], &slotInfo);
         if (rv != CKR_OK) continue;
         if (!(slotInfo.flags & CKF_TOKEN_PRESENT)) {
@@ -111,6 +115,12 @@ int main(int argc, char *argv[]) {
             printf("Slot %d description: %s\n", (int) slotList[i],  stringify(slotInfo.slotDescription, 64));
         }
         validSlot = slotList[i];
+    }
+
+    if (! p11p->C_GetSlotInfo && numSlots > 0) {
+	fprintf(stderr, "C_GetSlotInfo is NULL, assuming first slot "
+		"is valid\n");
+	validSlot = 0;
     }
 
     if (slotList) free(slotList);
@@ -133,7 +143,11 @@ int main(int argc, char *argv[]) {
 
 
     memset(&sInfo, 0, sizeof(sInfo));
-    rv = p11p->C_GetSlotInfo(slot, &sInfo);
+    if (p11p->C_GetSlotInfo) {
+	rv = p11p->C_GetSlotInfo(slot, &sInfo);
+    } else {
+	rv = CKR_FUNCTION_NOT_SUPPORTED;
+    }
     if (rv == CKR_OK) {
         printf("Slot Description: %s\n", stringify(sInfo.slotDescription, 64));
         printf("Slot Manufacturer: %s\n", stringify(sInfo.manufacturerID, 32));
@@ -181,7 +195,11 @@ int main(int argc, char *argv[]) {
     }
 
     memset(&sessionInfo, 0, sizeof(sessionInfo));
-    rv = p11p->C_GetSessionInfo(hSession, &sessionInfo);
+    if (p11p->C_GetSessionInfo)
+	rv = p11p->C_GetSessionInfo(hSession, &sessionInfo);
+    else
+	rv = CKR_FUNCTION_NOT_SUPPORTED;
+
     if (rv == CKR_OK) {
         printf("Session slot: %d\n", (int) sessionInfo.slotID);
         printf("Session state: %d\n", (int) sessionInfo.state);
