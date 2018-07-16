@@ -20,6 +20,22 @@
 #define CK_MINOR_VERSION 40
 
 /*
+ * Our list of "slots" and the identities stored in them
+ */
+
+struct slotinfo {
+	SecIdentityRef		ident;
+	SecCertificateRef	cert;
+	SecKeyRef		key;
+};
+
+static struct slotinfo *slotinfo_list = NULL;
+static unsigned int slotinfo_list_count = 0;
+static bool slotinfo_init = false;
+
+static void slotlist_free(void);
+
+/*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
  * (CKF_OS_LOCKING_OK) then we do that.  Otherwise we use the API-suppled
  * mutex calls.
@@ -88,7 +104,7 @@ do { \
 		if (unlockmutex) { \
 			rc = (*unlockmutex)(&mutex.ck); \
 		} else { \
-			rc = pthread_mutex_unlock(&mutex.pt, NULL); \
+			rc = pthread_mutex_unlock(&mutex.pt); \
 		} \
 		if (rc) { \
 			os_log_debug(logsys, "unlock_mutex returned %d", rc); \
@@ -96,8 +112,8 @@ do { \
 	} \
 } while (0)
 
-
 static kc_mutex slot_mutex;
+
 /*
  * Stuff required for logging; we're using the MacOS X native os_log
  * facility.  To get logs out of this, see log(1).  Specifically, if you
@@ -109,6 +125,19 @@ static kc_mutex slot_mutex;
 static void log_init(void);
 static os_log_t logsys;
 static pthread_once_t loginit = PTHREAD_ONCE_INIT;
+
+/*
+ * I guess the API lied; os_log_debug() REALLY can't take a const char *,
+ * it has to be a string constant.  Dammit.  End the string in a "%@" to
+ * print the error string.
+ */
+
+#define LOG_SEC_ERR(fmt, errnum) \
+do { \
+	CFStringRef errstr = SecCopyErrorMessageString(errnum, NULL); \
+	os_log_debug(logsys, fmt, errstr); \
+	CFRelease(errstr); \
+} while (0)
 
 /*
  * Declarations for our list of exported PKCS11 functions that we return
@@ -270,6 +299,8 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	CFDictionaryRef query;
 	CFArrayRef result;
 	OSStatus ret;
+	CK_RV rv;
+	unsigned int i, count;
 
 	/*
 	 * Our keys to create our query dictionary; note that the order
@@ -292,6 +323,18 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		     (int) *slot_num);
 
 	/*
+	 * If we've already been initialized (and slotlist isn't NULL),
+	 * then go to returning our count and possibly our slot indexes.
+	 */
+
+	LOCK_MUTEX(slot_mutex);
+
+	if (slot_list && slotinfo_init)
+		goto out;
+
+	slotlist_free();
+
+	/*
 	 * Build a dictionary up to get return values from SecItemCopyMatching()
 	 */
 
@@ -302,6 +345,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 	if (query == NULL) {
 		os_log_debug(logsys, "query dictionary creation returned NULL");
+		UNLOCK_MUTEX(slot_mutex);
 		return CKR_FUNCTION_FAILED;
 	}
 
@@ -310,20 +354,70 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	CFRelease(query);
 
 	if (ret) {
-		CFStringRef errmsg = SecCopyErrorMessageString(ret, NULL);
-
-		os_log_debug(logsys, "SecItemCopyMatching failed: %@", errmsg);
-
-		CFRelease(errmsg);
-
+		LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
+		UNLOCK_MUTEX(slot_mutex);
 		return CKR_FUNCTION_FAILED;
 	}
 
 	os_log_debug(logsys, "SecItemCopyMatching returned %{public}@", result);
 
+	/*
+	 * Loop over and store information about our "slots" in our internal
+	 * list.  
+	 */
+
+	count = CFArrayGetCount(result);
+
+	os_log_debug(logsys, "We found %d identities", (int) count);
+
+	slotlist_free();
+
+	slotinfo_list = malloc(sizeof(struct slotinfo) * count);
+	memset(slotinfo_list, 0, sizeof(struct slotinfo) * count);
+
+	for (i = 0; i < count; i++) {
+		os_log_debug(logsys, "Copying identity %d", (int) i + 1);
+		slotinfo_list[i].ident = (SecIdentityRef)
+					CFArrayGetValueAtIndex(result, i);
+		CFRetain(slotinfo_list[i].ident);
+		ret = SecIdentityCopyCertificate(slotinfo_list[i].ident, 
+						 &slotinfo_list[i].cert);
+		if (ret)
+			LOG_SEC_ERR("CopyCertificate failed: %@", ret);
+
+		if (! ret) {
+			ret = SecIdentityCopyPrivateKey(slotinfo_list[i].ident,
+							&slotinfo_list[i].key);
+			if (ret)
+				LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+		}
+
+		if (ret) {
+			CFRelease(result);
+			slotlist_free();
+			UNLOCK_MUTEX(slot_mutex);
+			return CKR_FUNCTION_FAILED;
+		}
+	}
+
 	CFRelease(result);
 
-	return CKR_OK;
+out:
+	rv = CKR_OK;
+
+	if (slot_list) {
+		if (*slot_num < slotinfo_list_count) {
+			rv = CKR_BUFFER_TOO_SMALL;
+		} else {
+			for (i = 0; i < slotinfo_list_count; i++)
+				slot_list[i] = i;
+		}
+	}
+
+	*slot_num = slotinfo_list_count;
+	UNLOCK_MUTEX(slot_mutex);
+
+	return rv;
 }
 
 NOTSUPPORTED(C_GetSlotInfo, (CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info))
@@ -394,7 +488,33 @@ NOTSUPPORTED(C_WaitForSlotEvent, (CK_SESSION_HANDLE session, CK_SLOT_ID_PTR slot
  * Make sure the our custom logging system is enabled
  */
 
-static void log_init(void)
+static void
+log_init(void)
 {
 	logsys = os_log_create("mil.navy.nrl.cmf.pkcs11", "general");
+}
+
+/*
+ * Free our slot information list
+ */
+
+void
+slotlist_free(void)
+{
+	int i;
+
+	for (i = 0; i < slotinfo_list_count; i++) {
+		if (slotinfo_list[i].ident)
+			CFRelease(slotinfo_list[i].ident);
+		if (slotinfo_list[i].key)
+			CFRelease(slotinfo_list[i].key);
+		if (slotinfo_list[i].cert)
+			CFRelease(slotinfo_list[i].cert);
+	}
+
+	if (slotinfo_list)
+		free(slotinfo_list);
+
+	slotinfo_list = NULL;
+	slotinfo_list_count = 0;
 }
