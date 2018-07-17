@@ -8,6 +8,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
 #include <pthread.h>
 
 #include "mypkcs11.h"
@@ -113,6 +115,12 @@ do { \
 } while (0)
 
 static kc_mutex slot_mutex;
+
+/*
+ * Various other utility functions we need
+ */
+
+static void sprintfpad(unsigned char *, size_t, const char *, ...);
 
 /*
  * Stuff required for logging; we're using the MacOS X native os_log
@@ -275,15 +283,11 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 	p->cryptokiVersion.major = CK_MAJOR_VERSION;
 	p->cryptokiVersion.minor = CK_MINOR_VERSION;
 
-	snprintf((char *) p->manufacturerID, sizeof(p->manufacturerID), "%*s",
-		 (int) - sizeof(p->manufacturerID),
-		 "US Naval Research Lab");
-	p->manufacturerID[sizeof(p->manufacturerID) - 1] = ' ';
+	sprintfpad(p->manufacturerID, sizeof(p->manufacturerID),
+		   "US Naval Research Lab");
 
-	snprintf((char *) p->libraryDescription, sizeof(p->libraryDescription), "%*s",
-		 (int) - sizeof(p->libraryDescription),
-		 "Keychain PKCS#11 Bridge Library");
-	p->libraryDescription[sizeof(p->libraryDescription) - 1] = ' ';
+	sprintfpad(p->libraryDescription, sizeof(p->libraryDescription),
+		   "Keychain PKCS#11 Bridge Library");
 
 	p->libraryVersion.major = 1;
 	p->libraryVersion.minor = 0;
@@ -517,4 +521,30 @@ slotlist_free(void)
 
 	slotinfo_list = NULL;
 	slotinfo_list_count = 0;
+}
+
+/*
+ * A version of snprintf() which does space-padding
+ */
+
+static void
+sprintfpad(unsigned char *dest, size_t destsize, const char *fmt, ...)
+{
+	char *s;
+	va_list ap;
+	int rc;
+
+	va_start(ap, fmt);
+	rc = vasprintf(&s, fmt, ap);
+	va_end(ap);
+
+	if (rc < 1) {
+		memset(dest, ' ', destsize);
+	} else {
+		/* We are relying on strncpy not doing \0 at end for trunc */
+		strncpy((char *) dest, s, destsize);
+		if (rc < destsize)
+			memset(dest + rc, ' ', destsize - rc);
+		free(s);
+	}
 }
