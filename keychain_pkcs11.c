@@ -304,7 +304,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	CFArrayRef result;
 	OSStatus ret;
 	CK_RV rv;
-	unsigned int i, count;
+	unsigned int i;
 
 	/*
 	 * Our keys to create our query dictionary; note that the order
@@ -370,16 +370,17 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	 * list.  
 	 */
 
-	count = CFArrayGetCount(result);
-
-	os_log_debug(logsys, "We found %d identities", (int) count);
-
 	slotlist_free();
 
-	slotinfo_list = malloc(sizeof(struct slotinfo) * count);
-	memset(slotinfo_list, 0, sizeof(struct slotinfo) * count);
+	slotinfo_list_count = CFArrayGetCount(result);
 
-	for (i = 0; i < count; i++) {
+	os_log_debug(logsys, "We found %d identities",
+		     (int) slotinfo_list_count);
+
+	slotinfo_list = malloc(sizeof(struct slotinfo) * slotinfo_list_count);
+	memset(slotinfo_list, 0, sizeof(struct slotinfo) * slotinfo_list_count);
+
+	for (i = 0; i < slotinfo_list_count; i++) {
 		os_log_debug(logsys, "Copying identity %d", (int) i + 1);
 		slotinfo_list[i].ident = (SecIdentityRef)
 					CFArrayGetValueAtIndex(result, i);
