@@ -29,6 +29,12 @@ struct slotinfo {
 	SecIdentityRef		ident;
 	SecCertificateRef	cert;
 	SecKeyRef		key;
+	char *			label;
+	bool			hardware;
+	bool			privcansign;
+	bool			privcandecrypt;
+	bool			canverify;
+	bool			canencrypt;
 };
 
 static struct slotinfo *slotinfo_list = NULL;
@@ -121,6 +127,9 @@ static kc_mutex slot_mutex;
  */
 
 static void sprintfpad(unsigned char *, size_t, const char *, ...);
+static void logtype(const char *, CFTypeRef);
+static void dumpdict(const char *, CFDictionaryRef);
+static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 
 /*
  * Stuff required for logging; we're using the MacOS X native os_log
@@ -313,10 +322,12 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 	const void * keys[] = {
 		kSecClass, kSecMatchLimit,
-		kSecReturnRef, kSecAttrCanSign,
+		kSecReturnRef, /* kSecAttrCanSign, */
+		kSecReturnAttributes,
 	};
 	const void * values[] = {
 		kSecClassIdentity, kSecMatchLimitAll, kCFBooleanTrue,
+		/* kCFBooleanTrue, */
 		kCFBooleanTrue,
 	};
 
@@ -364,6 +375,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	}
 
 	os_log_debug(logsys, "SecItemCopyMatching returned %{public}@", result);
+	logtype("Result type", result);
 
 	/*
 	 * Loop over and store information about our "slots" in our internal
@@ -381,10 +393,49 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	memset(slotinfo_list, 0, sizeof(struct slotinfo) * slotinfo_list_count);
 
 	for (i = 0; i < slotinfo_list_count; i++) {
+		CFDictionaryRef attrs = CFArrayGetValueAtIndex(result, i);
+		CFStringRef label;
+
 		os_log_debug(logsys, "Copying identity %d", (int) i + 1);
-		slotinfo_list[i].ident = (SecIdentityRef)
-					CFArrayGetValueAtIndex(result, i);
+
+		if (CFDictionaryGetValueIfPresent(attrs, kSecAttrLabel,
+						  &label)) {
+			slotinfo_list[i].label = getstrcopy(label);
+			os_log_debug(logsys, "Identity label: %@", label);
+		} else {
+			slotinfo_list[i].label = strdup("Hardware token");
+			os_log_debug(logsys, "No label, using default");
+		}
+#if 0
+		os_log_debug(logsys, "Identity %d: %{public}@", (int) i + 1,
+			     CFArrayGetValueAtIndex(result, i));
+		logtype("Identity type", CFArrayGetValueAtIndex(result, i));
+		dumpdict("identity", CFArrayGetValueAtIndex(result, i));
+#endif
+
+		if (! CFDictionaryGetValueIfPresent(attrs, kSecValueRef,
+						    &slotinfo_list[i].ident)) {
+			os_log_debug(logsys, "Identity reference not found");
+			CFRelease(result);
+			slotlist_free();
+			UNLOCK_MUTEX(slot_mutex);
+			return CKR_FUNCTION_FAILED;
+		}
+
 		CFRetain(slotinfo_list[i].ident);
+
+		slotinfo_list[i].hardware = boolfromdict("ID-is-token", attrs,
+							 kSecAttrTokenID);
+		slotinfo_list[i].privcansign = boolfromdict("Can-Sign", attrs,
+							    kSecAttrCanSign);
+		slotinfo_list[i].canverify = boolfromdict("Can-Verify", attrs,
+							  kSecAttrCanVerify);
+		slotinfo_list[i].canencrypt = boolfromdict("Can-Encrypt", attrs,
+							   kSecAttrCanEncrypt);
+		slotinfo_list[i].privcandecrypt =
+					boolfromdict("Can-Decrypt", attrs,
+						     kSecAttrCanDecrypt);
+
 		ret = SecIdentityCopyCertificate(slotinfo_list[i].ident, 
 						 &slotinfo_list[i].cert);
 		if (ret)
@@ -406,6 +457,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 	}
 
 	CFRelease(result);
+	slotinfo_init = true;
 
 out:
 	rv = CKR_OK;
@@ -522,6 +574,7 @@ slotlist_free(void)
 
 	slotinfo_list = NULL;
 	slotinfo_list_count = 0;
+	slotinfo_init = false;
 }
 
 /*
@@ -548,4 +601,77 @@ sprintfpad(unsigned char *dest, size_t destsize, const char *fmt, ...)
 			memset(dest + rc, ' ', destsize - rc);
 		free(s);
 	}
+}
+
+/*
+ * Return a boolean value based on a dictionary key.  If the key is not
+ * set then return false.
+ */
+
+bool
+boolfromdict(const char *keyname, CFDictionaryRef dict, CFTypeRef key)
+{
+	CFTypeRef val;
+
+	if (! CFDictionaryGetValueIfPresent(dict, key, &val)) {
+		os_log_debug(logsys, "No value for %s in dictionary, "
+			     "returning FALSE", keyname);
+		return false;
+	}
+
+	if (CFGetTypeID(val) != CFBooleanGetTypeID() &&
+	    CFGetTypeID(val) != CFNumberGetTypeID()) {
+		os_log_debug(logsys, "%s was not a boolean, but exists, so "
+			     "returning TRUE", keyname);
+		return true;
+	}
+
+	os_log_debug(logsys, "%s is set to %{bool}d", keyname,
+		     CFBooleanGetValue(val));
+
+	return CFBooleanGetValue(val);
+}
+
+/*
+ * Log this object's type
+ */
+
+static void
+logtype(const char *string, CFTypeRef ref)
+{
+	CFTypeID id = CFGetTypeID(ref);
+	CFStringRef str = CFCopyTypeIDDescription(id);
+
+	os_log_debug(logsys, "%s: %{public}@", string, str);
+
+	CFRelease(str);
+}
+
+/*
+ * Dump the contents of a dictionary
+ */
+
+static void
+dumpdict(const char *string, CFDictionaryRef dict)
+{
+	unsigned int i, count = CFDictionaryGetCount(dict);
+	const void **keys, **values;
+
+	os_log_debug(logsys, "Dumping dictionary for %s", string);
+	os_log_debug(logsys, "Dictionary contains %u key/value pairs", count);
+
+	keys = malloc(sizeof(void *) * count);
+	values = malloc(sizeof(void *) * count);
+
+	CFDictionaryGetKeysAndValues(dict, keys, values);
+
+	for (i = 0; i < count; i++) {
+		os_log_debug(logsys, "Dictionary entry %d", (int) i);
+		os_log_debug(logsys, "Key value: %{public}@", keys[i]);
+		logtype("Value type", values[i]);
+		os_log_debug(logsys, "Value value: %{public}@", values[i]);
+	}
+
+	free(keys);
+	free(values);
 }
