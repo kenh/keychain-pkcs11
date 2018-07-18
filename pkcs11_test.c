@@ -28,7 +28,7 @@
 int main(int argc, char *argv[]) {
     CK_RV rv;
     CK_FUNCTION_LIST_PTR p11p;
-    CK_SLOT_ID slot;
+    CK_SLOT_ID slot = -1;
     CK_SESSION_HANDLE hSession;
     /* CK_UTF8CHAR pin[64]; */
     /* CK_ULONG pinLen = sizeof(pin) - 1; */
@@ -56,17 +56,20 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "s:")) != -1) {
+    while ((i = getopt(argc, argv, "n:s:")) != -1) {
 	switch (i) {
-	case 's':
+	case 'n':
 #ifdef HAVE_SETPROGNAME
 	    setprogname(optarg);
 #endif /* HAVE_SETPROGNAME */
 	    break;
+	case 's':
+	    slot = atoi(optarg);
+	    break;
 	case '?':
 	default:
-	    fprintf(stderr, "Usage: %s [-s progname] [pkcs11_library]\n",
-		    argv[0]);
+	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
+		    "[pkcs11_library]\n", argv[0]);
 	    exit(1);
 	}
     }
@@ -149,7 +152,8 @@ int main(int argc, char *argv[]) {
 
 
 
-    slot = validSlot;
+    if (slot == -1)
+	slot = validSlot;
 
 
 
