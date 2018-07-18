@@ -130,6 +130,7 @@ static void sprintfpad(unsigned char *, size_t, const char *, ...);
 static void logtype(const char *, CFTypeRef);
 static void dumpdict(const char *, CFDictionaryRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
+static char *getstrcopy(CFStringRef);
 
 /*
  * Stuff required for logging; we're using the MacOS X native os_log
@@ -399,9 +400,10 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		os_log_debug(logsys, "Copying identity %d", (int) i + 1);
 
 		if (CFDictionaryGetValueIfPresent(attrs, kSecAttrLabel,
-						  &label)) {
+						  (const void **) &label)) {
 			slotinfo_list[i].label = getstrcopy(label);
-			os_log_debug(logsys, "Identity label: %@", label);
+			os_log_debug(logsys, "Identity label: %{public}@",
+				     label);
 		} else {
 			slotinfo_list[i].label = strdup("Hardware token");
 			os_log_debug(logsys, "No label, using default");
@@ -414,7 +416,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 #endif
 
 		if (! CFDictionaryGetValueIfPresent(attrs, kSecValueRef,
-						    &slotinfo_list[i].ident)) {
+				    (const void **)&slotinfo_list[i].ident)) {
 			os_log_debug(logsys, "Identity reference not found");
 			CFRelease(result);
 			slotlist_free();
@@ -561,6 +563,8 @@ slotlist_free(void)
 	int i;
 
 	for (i = 0; i < slotinfo_list_count; i++) {
+		if (slotinfo_list[i].label)
+			free(slotinfo_list[i].label);
 		if (slotinfo_list[i].ident)
 			CFRelease(slotinfo_list[i].ident);
 		if (slotinfo_list[i].key)
@@ -630,6 +634,34 @@ boolfromdict(const char *keyname, CFDictionaryRef dict, CFTypeRef key)
 		     CFBooleanGetValue(val));
 
 	return CFBooleanGetValue(val);
+}
+
+/*
+ * Get a C string from a CFStringRef (assumes UTF-8 encoding).
+ * Allocates memory that must be free()d.
+ */
+
+static char *
+getstrcopy(CFStringRef string)
+{
+	const char *s = CFStringGetCStringPtr(string, kCFStringEncodingUTF8);
+
+	if (! s) {
+		CFIndex len = CFStringGetLength(string);
+		CFIndex size = CFStringGetMaximumSizeForEncoding(len,
+						 kCFStringEncodingUTF8) + 1;
+		char *p = malloc(size);
+
+		if (! CFStringGetCString(string, p, size,
+					 kCFStringEncodingUTF8)) {
+			free(p);
+			return strdup("Unknown string");
+		}
+
+		return p;
+	} else {
+		return strdup(s);
+	}
 }
 
 /*
