@@ -34,6 +34,7 @@ struct id_info {
 	SecIdentityRef		ident;
 	SecCertificateRef	cert;
 	SecKeyRef		key;
+	CK_KEY_TYPE		keytype;
 	char *			label;
 	bool			privcansign;
 	bool			privcandecrypt;
@@ -51,6 +52,7 @@ static bool id_list_init = false;
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static void id_list_free(void);
+static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
@@ -790,6 +792,7 @@ static int
 add_identity(CFDictionaryRef dict)
 {
 	CFStringRef label;
+	CFNumberRef keytype;
 	OSStatus ret;
 	int i = id_list_count;
 
@@ -841,6 +844,14 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	CFRetain(id_list[i].ident);
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrKeyType,
+					    (const void **) &keytype)) {
+		os_log_debug(logsys, "Key type not found");
+		return -1;
+	}
+
+	id_list[i].keytype = convert_keytype(keytype);
 
 	id_list[i].privcansign = boolfromdict("Can-Sign", dict,
 					      kSecAttrCanSign);
@@ -1028,4 +1039,60 @@ dumpdict(const char *string, CFDictionaryRef dict)
 
 	free(keys);
 	free(values);
+}
+
+/*
+ * Convert Security framework key types to PKCS#11 key types.
+ *
+ * Sigh.  This is a lot harder than I would like.  The Apple API is in flux;
+ * what the attribute dictionary returns is a CFNumber, but the constants
+ * you use are actually CFStrings which happen to have string values which
+ * correspond to the CFNumbers.  The numbers correspond to the values of
+ * CSSM_ALGORITHMS in cssmtype.h.  So that means a RSA key, for example,
+ * shows up in the attribute dictionary as a CFNumber with a value of 42,
+ * but the constant kSecAttrKeyTypeRSA is a CFString with the value of "42".
+ * (There is magic in the Security framework that lets you use things like
+ * kSecAttrKeyTypeRSA as an input key for kSecAttrKeyType).
+ *
+ * I am hesitant to include cssmtype.h, so what I have decided to do is
+ * convert the dictionary number we are given to a string and compare it
+ * against the relevant "new" API constants.  Hopefully we don't have that
+ * many.
+ */
+
+static CK_KEY_TYPE
+convert_keytype(CFNumberRef type)
+{
+	int i;
+	CFStringRef str = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"),
+						   type);
+
+	const struct {
+		const char *keyname;
+		CK_KEY_TYPE pkcs11_keytype;
+		CFStringRef sec_keytype;
+	} keytype_map[] = {
+		{ "RSA Key", CKK_RSA, kSecAttrKeyTypeRSA },
+		{ "DSA Key", CKK_DSA, kSecAttrKeyTypeDSA },
+		{ "AES Key", CKK_AES, kSecAttrKeyTypeAES },
+		{ "DES Key", CKK_DES, kSecAttrKeyTypeDES },
+		{ "3DES Key", CKK_DES3, kSecAttrKeyType3DES },
+		{ "EC Key", CKK_EC, kSecAttrKeyTypeEC },
+		{ NULL, 0, NULL },
+	};
+
+	for (i = 0; keytype_map[i].keyname; i++) {
+		if (CFEqual(str, keytype_map[i].sec_keytype)) {
+			os_log_debug(logsys, "This is a %s",
+				     keytype_map[i].keyname);
+			CFRelease(str);
+			return keytype_map[i].pkcs11_keytype;
+		}
+	}
+
+	CFRelease(str);
+
+	os_log_debug(logsys, "Keytype is unknown, returning VENDOR_DEFINED");
+
+	return CKK_VENDOR_DEFINED;
 }
