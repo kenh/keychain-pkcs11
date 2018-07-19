@@ -23,6 +23,8 @@
 
 /* Our slot number we use */
 #define KEYCHAIN_SLOT	1
+/* For now */
+#define SESSION_HANDLE	1
 
 /*
  * Our list of identities that is stored on our smartcard
@@ -378,7 +380,7 @@ out:
 
 CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 {
-	FUNCINITCHK(C_GetInfo);
+	FUNCINITCHK(C_GetSlotInfo);
 
 	os_log_debug(logsys, "slot_id = %d, slot_info = %p", (int) slot_id,
 		     slot_info);
@@ -428,7 +430,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 {
-	FUNCINITCHK(C_GetInfo);
+	FUNCINITCHK(C_GetTokenInfo);
 
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
 		     token_info);
@@ -467,6 +469,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	token_info->ulSessionCount = CK_EFFECTIVELY_INFINITE;
 	token_info->ulMaxRwSessionCount = 0;
 	token_info->ulRwSessionCount = 0;
+	token_info->ulMaxPinLen = 255;
+	token_info->ulMinPinLen = 1;
 	token_info->ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION;
 	token_info->ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION;
 	token_info->ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION;
@@ -486,13 +490,86 @@ NOTSUPPORTED(C_GetMechanismInfo, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype
 NOTSUPPORTED(C_InitToken, (CK_SLOT_ID slot_id, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen, CK_UTF8CHAR_PTR label))
 NOTSUPPORTED(C_InitPIN, (CK_SESSION_HANDLE session, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen))
 NOTSUPPORTED(C_SetPIN, (CK_SESSION_HANDLE session, CK_UTF8CHAR_PTR oldpin, CK_ULONG oldpinlen, CK_UTF8CHAR_PTR newpin, CK_ULONG newpinlen))
-NOTSUPPORTED(C_OpenSession, (CK_SLOT_ID slot_id, CK_FLAGS flags, CK_VOID_PTR app_callback, CK_NOTIFY notify_callback, CK_SESSION_HANDLE_PTR session))
+
+/*
+ * Open a "session". Right now this is mostly a no-op.
+ */
+
+CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
+		    CK_VOID_PTR app_callback, CK_NOTIFY notify_callback,
+		    CK_SESSION_HANDLE_PTR session)
+{
+	FUNCINITCHK(C_OpenSession);
+
+	os_log_debug(logsys, "slot_id = %d, flags = %#lx, app_callback = %p, "
+		     "notify_callback = %p, session_handle = %p", (int) slot_id,
+		     flags, app_callback, notify_callback, session);
+
+	if (slot_id != KEYCHAIN_SLOT)
+		return CKR_SLOT_ID_INVALID;
+
+	if (! (flags & CKF_SERIAL_SESSION))
+		return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
+
+	if (flags & CKF_RW_SESSION)
+		return CKR_TOKEN_WRITE_PROTECTED;
+
+	*session = SESSION_HANDLE;
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_CloseSession, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_CloseAllSessions, (CK_SLOT_ID slot_id))
-NOTSUPPORTED(C_GetSessionInfo, (CK_SESSION_HANDLE session, CK_SESSION_INFO_PTR session_info))
+
+CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
+		       CK_SESSION_INFO_PTR session_info)
+{
+	FUNCINITCHK(C_GetSessionInfo);
+
+	os_log_debug(logsys, "session = %d, session_info = %p",
+		     (int) session, session_info);
+
+	if (session != SESSION_HANDLE)
+		return CKR_SESSION_HANDLE_INVALID;
+
+	if (!session_info)
+		return CKR_ARGUMENTS_BAD;
+
+	session_info->slotID = KEYCHAIN_SLOT;
+	session_info->state = CKS_RO_USER_FUNCTIONS;
+	session_info->flags = CKF_SERIAL_SESSION;
+	session_info->ulDeviceError = 0;
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_GetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstate, CK_ULONG_PTR opstatelen))
 NOTSUPPORTED(C_SetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstate, CK_ULONG opstatelen, CK_OBJECT_HANDLE enckey, CK_OBJECT_HANDLE authkey))
-NOTSUPPORTED(C_Login, (CK_SESSION_HANDLE session, CK_USER_TYPE usertype, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen))
+
+/*
+ * Login to token.  Right now is a no-op, because should be handled by
+ * pop-up dialog.
+ */
+
+CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
+	      CK_UTF8CHAR_PTR pin, CK_ULONG pinlen)
+{
+	FUNCINITCHK(C_Login);
+
+	os_log_debug(logsys, "session = %d, user_type = %lu, pin = %s, "
+		     "pinlen = %lu", (int) session, usertype, pin, pinlen);
+
+	if (session != SESSION_HANDLE)
+		return CKR_SESSION_HANDLE_INVALID;
+
+	if (pin)
+		os_log_debug(logsys, "PIN was set, but it shouldn't have "
+			     "been, but we are ignoring that for now");
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_Logout, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_CreateObject, (CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR object))
 NOTSUPPORTED(C_CopyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR new_object))
