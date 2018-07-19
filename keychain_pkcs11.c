@@ -22,26 +22,30 @@
 #define CK_MINOR_VERSION 40
 
 /*
- * Our list of "slots" and the identities stored in them
+ * Our list of identities that is stored on our smartcard
  */
 
-struct slotinfo {
+struct id_info {
 	SecIdentityRef		ident;
 	SecCertificateRef	cert;
 	SecKeyRef		key;
 	char *			label;
-	bool			hardware;
 	bool			privcansign;
 	bool			privcandecrypt;
+/*
 	bool			canverify;
 	bool			canencrypt;
+*/
 };
 
-static struct slotinfo *slotinfo_list = NULL;
-static unsigned int slotinfo_list_count = 0;
-static bool slotinfo_init = false;
+static struct id_info *id_list = NULL;
+static unsigned int id_list_count = 0;		/* Number of valid entries */
+static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
+static bool id_list_init = false;
 
-static void slotlist_free(void);
+static int scan_identities(void);
+static int add_identity(CFDictionaryRef);
+static void id_list_free(void);
 
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
@@ -120,7 +124,7 @@ do { \
 	} \
 } while (0)
 
-static kc_mutex slot_mutex;
+static kc_mutex id_mutex;
 
 /*
  * Various other utility functions we need
@@ -257,7 +261,7 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		os_log_debug(logsys, "init was set to NULL");
 	}
 
-	CREATE_MUTEX(slot_mutex);
+	CREATE_MUTEX(id_mutex);
 
 	initialized = 1;
 
@@ -273,7 +277,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 		return CKR_ARGUMENTS_BAD;
 	}
 
-	DESTROY_MUTEX(slot_mutex);
+	DESTROY_MUTEX(id_mutex);
 
 	use_mutex = 0;
 	initialized = 0;
@@ -310,27 +314,7 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		    CK_ULONG_PTR slot_num)
 {
-	CFDictionaryRef query;
-	CFArrayRef result;
-	OSStatus ret;
 	CK_RV rv;
-	unsigned int i;
-
-	/*
-	 * Our keys to create our query dictionary; note that the order
-	 * keys and values need to match up
-	 */
-
-	const void * keys[] = {
-		kSecClass, kSecMatchLimit,
-		kSecReturnRef, /* kSecAttrCanSign, */
-		kSecReturnAttributes,
-	};
-	const void * values[] = {
-		kSecClassIdentity, kSecMatchLimitAll, kCFBooleanTrue,
-		/* kCFBooleanTrue, */
-		kCFBooleanTrue,
-	};
 
 	FUNCINITCHK(C_GetSlotList);
 
@@ -339,143 +323,49 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		     (int) *slot_num);
 
 	/*
-	 * If we've already been initialized (and slotlist isn't NULL),
-	 * then go to returning our count and possibly our slot indexes.
+	 * We need to rescan our identity list if slot_list is NULL or
+	 * we haven't been initialized.
 	 */
 
-	LOCK_MUTEX(slot_mutex);
+	LOCK_MUTEX(id_mutex);
 
-	if (slot_list && slotinfo_init)
-		goto out;
-
-	slotlist_free();
+	if (! id_list_init || !slot_list) {
+		if (scan_identities()) {
+			rv = CKR_FUNCTION_FAILED;
+			goto out;
+		}
+	}
 
 	/*
-	 * Build a dictionary up to get return values from SecItemCopyMatching()
+	 * So, here's the rule.  We only have one "slot"; tests show
+	 * that at least on High Sierra, multiple readers pluggged in
+	 * don't work, you can only see one.  So we only return one slot,
+	 * with a slot number of 1.  If token_present is false, we ALWAYS
+	 * return the slot; if token_present is true, then we return the
+	 * slot only if we have identities (because we search for hardware
+	 * token identities, this means we have a hardware token)
 	 */
 
-	query = CFDictionaryCreate(NULL, keys, values,
-				  sizeof(keys)/sizeof(keys[0]),
-				  &kCFTypeDictionaryKeyCallBacks,
-				  &kCFTypeDictionaryValueCallBacks);
-
-	if (query == NULL) {
-		os_log_debug(logsys, "query dictionary creation returned NULL");
-		UNLOCK_MUTEX(slot_mutex);
-		return CKR_FUNCTION_FAILED;
-	}
-
-	ret = SecItemCopyMatching(query, (CFTypeRef *) &result);
-
-	CFRelease(query);
-
-	if (ret) {
-		LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
-		UNLOCK_MUTEX(slot_mutex);
-		return CKR_FUNCTION_FAILED;
-	}
-
-	os_log_debug(logsys, "SecItemCopyMatching returned %{public}@", result);
-	logtype("Result type", result);
-
-	/*
-	 * Loop over and store information about our "slots" in our internal
-	 * list.  
-	 */
-
-	slotlist_free();
-
-	slotinfo_list_count = CFArrayGetCount(result);
-
-	os_log_debug(logsys, "We found %d identities",
-		     (int) slotinfo_list_count);
-
-	slotinfo_list = malloc(sizeof(struct slotinfo) * slotinfo_list_count);
-	memset(slotinfo_list, 0, sizeof(struct slotinfo) * slotinfo_list_count);
-
-	for (i = 0; i < slotinfo_list_count; i++) {
-		CFDictionaryRef attrs = CFArrayGetValueAtIndex(result, i);
-		CFStringRef label;
-
-		os_log_debug(logsys, "Copying identity %d", (int) i + 1);
-
-		if (CFDictionaryGetValueIfPresent(attrs, kSecAttrLabel,
-						  (const void **) &label)) {
-			slotinfo_list[i].label = getstrcopy(label);
-			os_log_debug(logsys, "Identity label: %{public}@",
-				     label);
-		} else {
-			slotinfo_list[i].label = strdup("Hardware token");
-			os_log_debug(logsys, "No label, using default");
-		}
-#if 0
-		os_log_debug(logsys, "Identity %d: %{public}@", (int) i + 1,
-			     CFArrayGetValueAtIndex(result, i));
-		logtype("Identity type", CFArrayGetValueAtIndex(result, i));
-		dumpdict("identity", CFArrayGetValueAtIndex(result, i));
-#endif
-
-		if (! CFDictionaryGetValueIfPresent(attrs, kSecValueRef,
-				    (const void **)&slotinfo_list[i].ident)) {
-			os_log_debug(logsys, "Identity reference not found");
-			CFRelease(result);
-			slotlist_free();
-			UNLOCK_MUTEX(slot_mutex);
-			return CKR_FUNCTION_FAILED;
-		}
-
-		CFRetain(slotinfo_list[i].ident);
-
-		slotinfo_list[i].hardware = boolfromdict("ID-is-token", attrs,
-							 kSecAttrTokenID);
-		slotinfo_list[i].privcansign = boolfromdict("Can-Sign", attrs,
-							    kSecAttrCanSign);
-		slotinfo_list[i].canverify = boolfromdict("Can-Verify", attrs,
-							  kSecAttrCanVerify);
-		slotinfo_list[i].canencrypt = boolfromdict("Can-Encrypt", attrs,
-							   kSecAttrCanEncrypt);
-		slotinfo_list[i].privcandecrypt =
-					boolfromdict("Can-Decrypt", attrs,
-						     kSecAttrCanDecrypt);
-
-		ret = SecIdentityCopyCertificate(slotinfo_list[i].ident, 
-						 &slotinfo_list[i].cert);
-		if (ret)
-			LOG_SEC_ERR("CopyCertificate failed: %@", ret);
-
-		if (! ret) {
-			ret = SecIdentityCopyPrivateKey(slotinfo_list[i].ident,
-							&slotinfo_list[i].key);
-			if (ret)
-				LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
-		}
-
-		if (ret) {
-			CFRelease(result);
-			slotlist_free();
-			UNLOCK_MUTEX(slot_mutex);
-			return CKR_FUNCTION_FAILED;
-		}
-	}
-
-	CFRelease(result);
-	slotinfo_init = true;
-
-out:
 	rv = CKR_OK;
 
-	if (slot_list) {
-		if (*slot_num < slotinfo_list_count) {
-			rv = CKR_BUFFER_TOO_SMALL;
-		} else {
-			for (i = 0; i < slotinfo_list_count; i++)
-				slot_list[i] = i;
+	if (!token_present || id_list_count > 0) {
+		if (slot_list) {
+			if (*slot_num == 0)
+				rv = CKR_BUFFER_TOO_SMALL;
+			else
+				slot_list[0] = 1;	/* Our only slot */
 		}
+		*slot_num = 1;
+	} else {
+		/*
+		 * If we're here, token_present is TRUE and we have no
+		 * identities, so return zero slots
+		 */
+		*slot_num = 0;
 	}
 
-	*slot_num = slotinfo_list_count;
-	UNLOCK_MUTEX(slot_mutex);
-
+out:
+	UNLOCK_MUTEX(id_mutex);
 	return rv;
 }
 
@@ -544,6 +434,251 @@ NOTSUPPORTED(C_CancelFunction, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_WaitForSlotEvent, (CK_SESSION_HANDLE session, CK_SLOT_ID_PTR slot_id, CK_VOID_PTR reserved))
 
 /*
+ * Use the Security framework to scan for any identities that are provided
+ * by a smartcard, and copy out useful information from them.
+ *
+ * So, how does this work?
+ *
+ * We call SecItemCopyMatching() to find any "identities" known by the
+ * Security framework.  An identity is a private key with a matching
+ * certificate.  We restrict the search to tokens that live on smartcards.
+ * Returns -1 on failure, 0 on success.
+ *
+ * Should be called with id_mutex locked.
+ */ 
+
+static int
+scan_identities(void)
+{
+	CFDictionaryRef query;
+	CFTypeRef result;
+	CFTypeID resid;
+	int ret;
+
+	/*
+	 * Our keys to create our query dictionary; note that the order
+	 * keys and values need to match up.
+	 *
+	 * Here's what's the query dictionary means:
+	 *
+	 * kSecClass = kSecClassIdentity
+	 *	This means we're searching for "identities" (certificates
+	 *	with corresponding private key objects).
+	 * kSecMatchLimit = kSecMatchLimitAll
+	 *	Without this, we only get one identity.  Setting this means
+	 *	our return value could be a list of identities.  If we get
+	 *	more than one identity returned then the result will be
+	 *	a CFArrayRef, otherwise it will be a CFDictionaryRef
+	 *	(see below).
+	 * kSecAttrAccessGroup = kSecAttrAccessGroupToken
+	 *	This will limit the search to identities which are in the
+	 *	"Token" Access group; this means smartcards.  This isn't
+	 *	documented very well, but I see that the security tool
+	 *	"list-smartcards" command uses this so I feel it's pretty
+	 *	safe to rely on this search key for now.
+	 * kSecReturnRef = kCFBooleanTrue
+	 *	This means return a reference to the identity (SecIdentityRef).
+	 *	If we just specified this it would mean that we'd get one
+	 *	or more SecIdentityRefs in an array, but because we ask for
+	 *	the attributes (see below) the SecIdentityRef ends up in
+	 *	the results dictionary, under the kSecValueRef key.
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 *	This means we return all of the attributes for each identity.
+	 *	We can use this to get access to things like the label
+	 *	for the identity.
+	 *
+	 * Because we ask for all of the Attributes using kSecReturnAttributes
+	 * the return value is a CFDictionaryRef containing all of the
+	 * various attributes.  If we get more than one identity back, then
+	 * we will get a CFArrayRef, with each entry in the array containing
+	 * the CFDictionaryRef for that attribute.
+	 *
+	 * Whew.
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+		kSecMatchLimit,
+		kSecAttrAccessGroup,
+		kSecReturnRef,
+		kSecReturnAttributes,
+	};
+	const void * values[] = {
+		kSecClassIdentity,		/* kSecClass */
+		kSecMatchLimitAll,		/* kSecMatchLimit */
+		kSecAttrAccessGroupToken,	/* kSecAttrAccessGroup */
+		kCFBooleanTrue,			/* kSecReturnRef */
+		kCFBooleanTrue,			/* kSecReturnAttributes */
+	};
+
+	/*
+	 * Clear out all previous identity entries
+	 */
+
+	id_list_free();
+
+	/*
+	 * Create the query dictionary for SecCopyItemMatching(); see above
+	 */
+
+	query = CFDictionaryCreate(NULL, keys, values,
+				   sizeof(keys)/sizeof(keys[0]),
+				   &kCFTypeDictionaryKeyCallBacks,
+				   &kCFTypeDictionaryValueCallBacks);
+
+	if (query == NULL) {
+		os_log_debug(logsys, "query dictionary creation returned NULL");
+		return -1;
+	}
+
+	/*
+	 * This is where the actual query happens
+	 */
+
+	ret = SecItemCopyMatching(query, &result);
+
+	CFRelease(query);
+
+	if (ret) {
+		/*
+		 * Handle the case where we just don't see any matching
+		 * results.
+		 */
+
+		if (ret == errSecItemNotFound) {
+			os_log_debug(logsys, "No identities returned");
+			id_list_init = true;
+			return 0;
+		}
+
+		LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
+		return -1;
+	}
+
+	/*
+	 * Check to see if we got an array (more than one identity) or
+	 * a dictionary (a single item).
+	 */
+
+	resid = CFGetTypeID(result);
+
+	if (resid == CFArrayGetTypeID()) {
+		unsigned int i, count = CFArrayGetCount(result);
+
+		os_log_debug(logsys, "%u identities found", count);
+
+		for (i = 0; i < count; i++)  {
+			os_log_debug(logsys, "Copying identity %u", i + 1);
+
+			if (add_identity(CFArrayGetValueAtIndex(result, i))) {
+				ret = -1;
+				goto out;
+			}
+		}
+	} else if (resid == CFDictionaryGetTypeID()) {
+		os_log_debug(logsys, "1 identity found");
+		if (add_identity(result)) {
+			ret = -1;
+			goto out;
+		}
+	} else {
+		logtype("Unexpected type from SecCopyItemMatching", result);
+		ret = -1;
+		goto out;
+	}
+
+	ret = 0;
+	id_list_init = true;
+out:
+	CFRelease(result);
+	return ret;
+}
+
+/*
+ * Add an identity to our identity list.  Takes a CFDictionaryRef with
+ * all of the identity attributes in it
+ */
+
+static int
+add_identity(CFDictionaryRef dict)
+{
+	CFStringRef label;
+	OSStatus ret;
+	int i = id_list_count;
+
+	/*
+	 * If we don't have enough id entries, allocate some more.
+	 */
+
+	if (++id_list_count > id_list_size) {
+		id_list_size += 5;
+		id_list = realloc(id_list, sizeof(*id_list) * id_list_size);
+	}
+
+	id_list[i].ident = NULL;
+	id_list[i].cert = NULL;
+	id_list[i].key = NULL;
+	id_list[i].label = NULL;
+
+	/*
+	 * Extract out of the dictionary all of the things we need.
+	 * Note that since we are following the "Get Rule" and this
+	 * dictionary should be de-allocated soon, we need to CFRetain()
+	 * everything we want for later.
+	 *
+	 * Key items:
+	 *
+	 * Attribute label (display string for the identity)
+	 * SecIdentityRef (used by Security Framework)
+	 * Various attribute flags (we use those for returning
+	 * object information)
+	 *
+	 * To make things easier, we extract the private key object
+	 * and the certificate from the identity.  Those are copies and
+	 * we don't need to retain those objects.
+	 */
+
+	if (CFDictionaryGetValueIfPresent(dict, kSecAttrLabel,
+					  (const void **) &label)) {
+		id_list[i].label = getstrcopy(label);
+		os_log_debug(logsys, "Identity label: %{public}@", label);
+	} else {
+		id_list[i].label = strdup("Hardware token");
+		os_log_debug(logsys, "No label, using default");
+	}
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecValueRef,
+					    (const void **)&id_list[i].ident)) {
+		os_log_debug(logsys, "Identity reference not found");
+		return -1;
+	}
+
+	CFRetain(id_list[i].ident);
+
+	id_list[i].privcansign = boolfromdict("Can-Sign", dict,
+					      kSecAttrCanSign);
+	id_list[i].privcandecrypt = boolfromdict("Can-Decrypt", dict,
+						 kSecAttrCanDecrypt);
+
+	ret = SecIdentityCopyCertificate(id_list[i].ident, &id_list[i].cert);
+
+	if (ret)
+		LOG_SEC_ERR("CopyCertificate failed: %@", ret);
+
+	if (! ret) {
+		ret = SecIdentityCopyPrivateKey(id_list[i].ident,
+						&id_list[i].key);
+		if (ret)
+			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+	}
+
+	if (ret)
+		return -1;
+
+	return 0;
+}
+
+/*
  * Make sure the our custom logging system is enabled
  */
 
@@ -554,31 +689,31 @@ log_init(void)
 }
 
 /*
- * Free our slot information list
+ * Free our identity list
  */
 
-void
-slotlist_free(void)
+static void
+id_list_free(void)
 {
 	int i;
 
-	for (i = 0; i < slotinfo_list_count; i++) {
-		if (slotinfo_list[i].label)
-			free(slotinfo_list[i].label);
-		if (slotinfo_list[i].ident)
-			CFRelease(slotinfo_list[i].ident);
-		if (slotinfo_list[i].key)
-			CFRelease(slotinfo_list[i].key);
-		if (slotinfo_list[i].cert)
-			CFRelease(slotinfo_list[i].cert);
+	for (i = 0; i < id_list_count; i++) {
+		if (id_list[i].label)
+			free(id_list[i].label);
+		if (id_list[i].ident)
+			CFRelease(id_list[i].ident);
+		if (id_list[i].key)
+			CFRelease(id_list[i].key);
+		if (id_list[i].cert)
+			CFRelease(id_list[i].cert);
 	}
 
-	if (slotinfo_list)
-		free(slotinfo_list);
+	if (id_list)
+		free(id_list);
 
-	slotinfo_list = NULL;
-	slotinfo_list_count = 0;
-	slotinfo_init = false;
+	id_list = NULL;
+	id_list_count = id_list_size = 0;
+	id_list_init = false;
 }
 
 /*
