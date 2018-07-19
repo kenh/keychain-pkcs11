@@ -23,7 +23,79 @@
 #include "pkcs11_test.h"
 #include "config.h"
 
+#include <stdarg.h>
 
+/*
+ * Dump one or more attributes of an object
+ */
+
+static CK_RV dump_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+		  CK_OBJECT_HANDLE, CK_ULONG *, ...);
+
+/*
+ * Our routines to output attribute information
+ */
+
+struct attr_handler {
+    CK_ATTRIBUTE_TYPE attr;	/* Attribute */
+    const char *label;	/* Attribute printed label */
+    void (*dumper)(unsigned char *, unsigned int);	/* dumper function */
+};
+
+static void hexify_dump(unsigned char *, unsigned int);
+static void string_dump(unsigned char *, unsigned int);
+static void certtype_dump(unsigned char *, unsigned int);
+static void length_dump(unsigned char *, unsigned int);
+static void class_dump(unsigned char *, unsigned int);
+static void mech_dump(unsigned char *, unsigned int);
+static void mechlist_dump(unsigned char *, unsigned int);
+static void keytype_dump(unsigned char *, unsigned int);
+
+static struct attr_handler id_attr = {
+    CKA_ID, "Key Identifier", hexify_dump
+};
+
+static struct attr_handler ctype_attr = {
+    CKA_CERTIFICATE_TYPE, "Certificate Type", certtype_dump
+};
+
+static struct attr_handler value_attr = {
+    CKA_VALUE, "Object value", length_dump
+};
+
+static struct attr_handler class_attr = {
+    CKA_CLASS, "Object class", class_dump
+};
+
+static struct attr_handler app_attr = {
+    CKA_APPLICATION, "Application Description", string_dump
+};
+
+static struct attr_handler objid_attr = {
+    CKA_OBJECT_ID, "Object ID", hexify_dump
+};
+
+static struct attr_handler genmech_attr = {
+    CKA_KEY_GEN_MECHANISM, "Key Generation Mechanism", mech_dump
+};
+
+static struct attr_handler allowedmech_attr = {
+    CKA_ALLOWED_MECHANISMS, "Allowed Mechanisms", mechlist_dump
+};
+
+static struct attr_handler subject_attr = {
+    CKA_SUBJECT, "Subject name", hexify_dump
+};
+
+static struct attr_handler keytype_attr = {
+    CKA_KEY_TYPE, "Key type", keytype_dump
+};
+
+#if 0
+static struct attr_handler value_attr = {
+    CKA_VALUE, "Object value", hexify_dump
+};
+#endif
 
 int main(int argc, char *argv[]) {
     CK_RV rv;
@@ -234,7 +306,7 @@ int main(int argc, char *argv[]) {
     }
 
 
-    rv = login(p11p, hSession, 0, NULL, 0);
+    rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error logging into token (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
@@ -255,103 +327,44 @@ int main(int argc, char *argv[]) {
     phObject = malloc(maxSize * sizeof(CK_OBJECT_HANDLE_PTR));
 
 
-    rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
-    if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
-        (void)p11p->C_CloseSession(hSession);
-        goto cleanup;
-    }
-    fprintf(stderr, "Found %d objects\n", (int) count);
+    do {
+	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "Error Finding Objects (rv = %X)\n",
+			(unsigned int) rv);
+		(void)p11p->C_CloseSession(hSession);
+		goto cleanup;
+	    }
 
-    for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
+	fprintf(stderr, "Found %d objects\n", (int) count);
 
-        attrs[0].type = CKA_CLASS;
-        attrs[0].pValue = &ulValue;
-        attrs[0].ulValueLen = sizeof(CK_ULONG);
+	for(i = 0; i < count; i++) {
+	    printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
 
-        rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
-        if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
-            (void)p11p->C_CloseSession(hSession);
-            goto cleanup;
-        }
+	    rv = dump_attrs(p11p, hSession, phObject[i], &ulValue, &class_attr,
+			    (void *) NULL);
 
+	    if (rv != CKR_OK)
+		continue;
 
-        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
-        switch(ulValue) {
+	    switch(ulValue) {
             case CKO_DATA:
-                {
-                    fprintf(stderr, "CKO_DATA\n");
-
-                }
-
-
-
+		dump_attrs(p11p, hSession, phObject[i], NULL, &app_attr,
+			   &objid_attr, &value_attr, (void *) NULL);
                 break;
             case CKO_CERTIFICATE:
-            {
-                CK_CERTIFICATE_TYPE certType;
-                CK_BYTE certData[2048];
-                unsigned char keyId[20];
-                int j;
-
-                memset(&certType,0,sizeof(certType));
-                memset(certData,0,sizeof(certData));
-                memset(keyId,0,sizeof(keyId));
-
-                fprintf(stderr, "CKO_CERTIFICATE\n");
-
-                attrs[0].type = CKA_CERTIFICATE_TYPE;
-                attrs[0].pValue = &certType;
-                attrs[0].ulValueLen = sizeof(certType);
-
-                attrs[1].type = CKA_ID;
-                attrs[1].pValue = &keyId;
-                attrs[1].ulValueLen = sizeof(keyId);
-
-                attrs[2].type = CKA_VALUE;
-                attrs[2].pValue = &certData;
-                attrs[2].ulValueLen = sizeof(certData);
-
-
-
-                for(j=0;j<4;j++) {
-                    rv = p11p->C_GetAttributeValue(hSession, phObject[i], &(attrs[j]), 1);
-                    if(rv != CKR_OK) {
-                        fprintf(stderr, "Error getting object attributes for %d (rv = 0x%X)\n",j, (unsigned int) rv);
-
-                    }
-                }
-
-
-                fprintf(stderr, "    type: %d\n", (int) certType);
-                //fwrite(certData, attrs[3].ulValueLen, 1, stdout);
-                fprintf(stderr,"     keyId: %s\n", hexify(keyId,attrs[1].ulValueLen));
-
-
-            }
+		dump_attrs(p11p, hSession, phObject[i], NULL, &ctype_attr,
+			   &id_attr, &value_attr, (void *) NULL);
                 break;
-            case CKO_PUBLIC_KEY:
-                fprintf(stderr, "CKO_PUBLIC_KEY\n"); break;
-            case CKO_PRIVATE_KEY:
-                fprintf(stderr, "CKO_PRIVATE_KEY\n"); break;
-            case CKO_SECRET_KEY:
-                fprintf(stderr, "CKO_SECRET_KEY\n"); break;
-            case CKO_HW_FEATURE:
-                fprintf(stderr, "CKO_HW_FEATURE\n"); break;
-            case CKO_DOMAIN_PARAMETERS:
-                fprintf(stderr, "CKO_DOMAIN_PARAMETERS\n"); break;
-            case CKO_MECHANISM:
-                fprintf(stderr, "CKO_MECHANISM\n"); break;
-            case CKO_OTP_KEY:
-                fprintf(stderr, "CKO_OTP_KEY\n"); break;
-            default:
-                fprintf(stderr,"\n");
-        }
-
-
-    }
+	    case CKO_PUBLIC_KEY:
+	    case CKO_PRIVATE_KEY:
+		dump_attrs(p11p, hSession, phObject[i], NULL, &id_attr,
+			   &keytype_attr, &genmech_attr, &allowedmech_attr,
+			   &subject_attr, (void *) NULL);
+		break;
+	    }
+	}
+    } while (count > 0);
 
     rv = p11p->C_FindObjectsFinal(hSession);
     if (rv != CKR_OK) {
@@ -379,45 +392,31 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
-    if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
-        (void)p11p->C_CloseSession(hSession);
-        goto cleanup;
-    }
-    fprintf(stderr, "Found %d objects\n", (int) count);
+    do {
+	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
+	    (void)p11p->C_CloseSession(hSession);
+	    goto cleanup;
+	}
 
-    for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
-        attrs[0].type = CKA_CLASS;
-        attrs[0].pValue = &ulValue;
-        attrs[0].ulValueLen = sizeof(CK_ULONG);
+	fprintf(stderr, "Found %d objects\n", (int) count);
 
-        rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
-        if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
-            (void)p11p->C_CloseSession(hSession);
-            goto cleanup;
-        }
+	for(i = 0; i < count; i++) {
+	    rv = dump_attrs(p11p, hSession, phObject[i], &ulValue, &class_attr,
+			    (void *) NULL);
 
+	    if (rv != CKR_OK)
+		continue;
 
-        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
-        switch(ulValue) {
-            case CKA_TOKEN: fprintf(stderr, "CKA_TOKEN\n");
+	    switch(ulValue) {
+            case CKO_CERTIFICATE:
+		dump_attrs(p11p, hSession, phObject[i], NULL, &ctype_attr,
+			   &id_attr, &value_attr, (void *) NULL);
                 break;
-            case CKA_PRIVATE: fprintf(stderr, "CKA_PRIVATE\n");
-                break;
-            case CKA_LABEL: fprintf(stderr, "CKA_LABEL\n");
-                break;
-            case CKA_APPLICATION: fprintf(stderr, "CKA_APPLICATION\n");
-                break;
-            case CKA_VALUE: fprintf(stderr, "CKA_VALUE\n");
-                break;
-            default:
-                fprintf(stderr,"\n");
-        }
-
-    }
+	    }
+	}
+    } while (count > 0);
 
     rv = p11p->C_FindObjectsFinal(hSession);
 
@@ -435,58 +434,46 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
-    if (rv != CKR_OK) {
-        fprintf(stderr, "Error Finding Objects (rv = %X)\n", (unsigned int) rv);
-        (void)p11p->C_CloseSession(hSession);
-        goto cleanup;
-    }
-    fprintf(stderr, "Found %d objects\n", (int) count);
+    do {
+	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+	if (rv != CKR_OK) {
+		fprintf(stderr, "Error Finding Objects (rv = %X)\n",
+			(unsigned int) rv);
+		(void)p11p->C_CloseSession(hSession);
+		goto cleanup;
+	}
+	fprintf(stderr, "Found %d objects\n", (int) count);
 
-    for(i = 0; i < count; i++) {
-        printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
-        attrs[0].type = CKA_CLASS;
-        attrs[0].pValue = &ulValue;
-        attrs[0].ulValueLen = sizeof(CK_ULONG);
+	for(i = 0; i < count; i++) {
+	    printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
+	    rv = dump_attrs(p11p, hSession, phObject[i], &ulValue, &class_attr,
+			    (void *) NULL);
 
-        rv = p11p->C_GetAttributeValue(hSession, phObject[i], attrs, 1);
-        if(rv != CKR_OK) {
-            fprintf(stderr, "Error getting object attributes (rv = %X)\n", (unsigned int) rv);
-            (void)p11p->C_CloseSession(hSession);
-            goto cleanup;
+	    if (rv != CKR_OK)
+		continue;
+	    switch(ulValue) {
+            case CKA_TOKEN:
+		dump_attrs(p11p, hSession, phObject[i], NULL, &app_attr,
+			   &objid_attr, &value_attr, (void *) NULL);
+		break;
+	    }
         }
 
-
-        fprintf(stderr, "  Class: 0x%X ", (unsigned int) ulValue);
-        switch(ulValue) {
-            case CKA_TOKEN: fprintf(stderr, "CKA_TOKEN\n");
-                break;
-            case CKA_PRIVATE: fprintf(stderr, "CKA_PRIVATE\n");
-                break;
-            case CKA_LABEL: fprintf(stderr, "CKA_LABEL\n");
-                break;
-            case CKA_APPLICATION: fprintf(stderr, "CKA_APPLICATION\n");
-                break;
-            case CKA_VALUE: fprintf(stderr, "CKA_VALUE\n");
-                break;
-            default:
-                fprintf(stderr,"\n");
-        }
-
-    }
+    } while (count > 0);
 
     rv = p11p->C_FindObjectsFinal(hSession);
 
 
 
+#if 0
 
-    rv = login(p11p, hSession, 0, NULL, 0);
+    rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
      if (rv != CKR_OK) {
          fprintf(stderr, "Error logging into token (rv = %X)\n", (unsigned int) rv);
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
      }
-
+#endif
 
     if (p11p->C_Logout)
 	p11p->C_Logout(hSession);
@@ -498,10 +485,15 @@ cleanup:
     return 0;
 }
 
-CK_RV login(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE hSession, int admin, CK_UTF8CHAR *password, CK_ULONG passwordLen) {
+CK_RV login(CK_FUNCTION_LIST_PTR p11p, CK_TOKEN_INFO_PTR tInfo, CK_SESSION_HANDLE hSession, int admin, CK_UTF8CHAR *password, CK_ULONG passwordLen) {
     CK_UTF8CHAR pin[64];
     CK_ULONG pinLen = sizeof(pin) - 1;
     CK_RV rv;
+
+    if (tInfo->flags & CKF_PROTECTED_AUTHENTICATION_PATH) {
+	printf("Protected authentication path found, not prompting PIN\n");
+	return CKR_OK;
+    }
 
     if (passwordLen > 0 && password != NULL && passwordLen <= pinLen) {
         memcpy(pin, password, passwordLen);
@@ -626,4 +618,208 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
     printf("\n");
     return(0);
 
+}
+
+/*
+ * Dump out attributes for a specific object.  Argument list should end
+ * with a NULL.
+ */
+
+static CK_RV
+dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
+	   CK_OBJECT_HANDLE obj, CK_ULONG *retval, ...)
+{
+    va_list ap;
+    struct attr_handler *ah;
+    CK_ATTRIBUTE template;
+    CK_RV rv, rvret = CKR_OK;
+    bool valret = false;
+
+    va_start(ap, retval);
+
+    while ((ah = va_arg(ap, struct attr_handler *))) {
+	template.type = ah->attr;
+	template.pValue = NULL;
+	template.ulValueLen = 0;
+	rv = p11p->C_GetAttributeValue(session, obj, &template, 1);
+	if (rv != CKR_OK) {
+	    printf("%s: C_GetAttributeValue returned %lu", ah->label, rv);
+	    rvret = rv;
+	    continue;
+	}
+	if (template.ulValueLen == CK_UNAVAILABLE_INFORMATION) {
+	    printf("%s: Information Unavailable\n", ah->label);
+	    continue;
+	}
+	template.pValue = malloc(template.ulValueLen);
+	rv = p11p->C_GetAttributeValue(session, obj, &template, 1);
+	if (rv != CKR_OK) {
+	    printf("%s: Second call to C_GetAttributeValue failed: %lu",
+		   ah->label, rv);
+	    free(template.pValue);
+	    rvret = rv;
+	    continue;
+	}
+	printf("%s: ", ah->label);
+	(*ah->dumper)(template.pValue, template.ulValueLen);
+	printf("\n");
+
+	/*
+	 * If we were passed in a value to return, then return the first
+	 * item that was the correct size (sizeof(CK_ULONG))
+	 */
+
+	if (retval && !valret) {
+	    *retval = *((CK_ULONG *) template.pValue);
+	    valret = true;
+	}
+
+	free(template.pValue);
+    }
+
+    va_end(ap);
+
+    return rvret;
+}
+
+/*
+ * Dump attribute information, using hexify()
+ */
+
+static void
+hexify_dump(unsigned char *data, unsigned int len)
+{
+    char *s = hexify(data, (int) len);
+
+    printf("%s", s);
+    free(s);
+}
+
+/*
+ * Dump certificate type information
+ */
+
+static void
+certtype_dump(unsigned char *data, unsigned int len)
+{
+    CK_CERTIFICATE_TYPE *type = (CK_CERTIFICATE_TYPE *) data;
+
+    if (len != sizeof(CK_CERTIFICATE_TYPE)) {
+    	printf("Unexpected length (got %d, expected %d)", (int) len,
+	       (int) sizeof(CK_CERTIFICATE_TYPE));
+	return;
+    }
+
+    switch (*type) {
+    case CKC_X_509:
+	printf("X.509 Certificate");
+	break;
+    case CKC_WTLS:
+	printf("WTLS Certificate");
+	break;
+    case CKC_X_509_ATTR_CERT:
+	printf("X.509 Attribute Certificate");
+	break;
+    default:
+	printf("Unknown certificate type: %#lx", *type);
+    }
+}
+
+/*
+ * Dump class information
+ */
+
+static void
+class_dump(unsigned char *data, unsigned int len)
+{
+    CK_OBJECT_CLASS *class = (CK_OBJECT_CLASS *) data;
+
+    if (len != sizeof(CK_OBJECT_CLASS)) {
+    	printf("Unexpected length (got %d, expected %d)", (int) len,
+	       (int) sizeof(CK_OBJECT_CLASS));
+	return;
+    }
+
+    printf("%s", getCKOName(*class));
+}
+
+/*
+ * Just dump length
+ */
+
+static void 
+length_dump(unsigned char *data, unsigned int len)
+{
+    printf("%u bytes", len);
+}
+
+/*
+ * Dump this as a string
+ */
+
+static void
+string_dump(unsigned char *data, unsigned int len)
+{
+    printf("%s", stringify(data, len));
+}
+
+/*
+ * Dump this as a single mechanism
+ */
+
+static void
+mech_dump(unsigned char *data, unsigned int len)
+{
+    CK_MECHANISM_TYPE *mech = (CK_MECHANISM_TYPE *) data;
+
+    if (len != sizeof(CK_MECHANISM_TYPE)) {
+    	printf("Unexpected length (got %d, expected %d)", (int) len,
+	       (int) sizeof(CK_MECHANISM_TYPE));
+	return;
+    }
+
+    printf("%s", getCKMName(*mech));
+}
+
+/*
+ * Dump a list of mechanisms
+ */
+
+static void
+mechlist_dump(unsigned char *data, unsigned int len)
+{
+    CK_MECHANISM_TYPE_PTR mechlist = (CK_MECHANISM_TYPE_PTR) data;
+    unsigned int count = len / sizeof(CK_MECHANISM_TYPE);
+    unsigned int i;
+
+    for (i = 0; i < count; i++)
+	printf("%s%s", i > 0 ? ", " : "", getCKMName(mechlist[i]));
+
+}
+
+/*
+ * Dump a key type
+ */
+
+static void
+keytype_dump(unsigned char *data, unsigned int len)
+{
+    CK_KEY_TYPE *keytype = (CK_KEY_TYPE *) data;
+
+    if (len != sizeof(CK_KEY_TYPE)) {
+    	printf("Unexpected length (got %d, expected %d)", (int) len,
+	       (int) sizeof(CK_KEY_TYPE));
+	return;
+    }
+
+    switch (*keytype) {
+    case CKK_RSA:
+    	printf("RSA Key");
+	break;
+    case CKK_DSA:
+    	printf("DSA Key");
+	break;
+    default:
+	printf("Unknown key type: %#lx", *keytype);
+    }
 }

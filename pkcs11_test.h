@@ -46,7 +46,7 @@ typedef HINSTANCE LpHandleType;
 
 void hexdump(unsigned char *, int);
 CK_RV get_slot(CK_FUNCTION_LIST_PTR, CK_SLOT_ID_PTR);
-CK_RV login(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE, int, CK_UTF8CHAR *, CK_ULONG);
+CK_RV login(CK_FUNCTION_LIST_PTR, CK_TOKEN_INFO_PTR, CK_SESSION_HANDLE, int, CK_UTF8CHAR *, CK_ULONG);
 CK_RV load_library(char *, CK_FUNCTION_LIST_PTR *);
 char *unhex(char *input, CK_ULONG *length);
 CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length);
