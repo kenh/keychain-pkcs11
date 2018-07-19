@@ -21,6 +21,9 @@
 #define CK_MAJOR_VERSION 2
 #define CK_MINOR_VERSION 40
 
+/* Our slot number we use */
+#define KEYCHAIN_SLOT	1
+
 /*
  * Our list of identities that is stored on our smartcard
  */
@@ -298,7 +301,7 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 	p->cryptokiVersion.minor = CK_MINOR_VERSION;
 
 	sprintfpad(p->manufacturerID, sizeof(p->manufacturerID),
-		   "US Naval Research Lab");
+		   "U.S. Naval Research Lab");
 
 	sprintfpad(p->libraryDescription, sizeof(p->libraryDescription),
 		   "Keychain PKCS#11 Bridge Library");
@@ -353,7 +356,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 			if (*slot_num == 0)
 				rv = CKR_BUFFER_TOO_SMALL;
 			else
-				slot_list[0] = 1;	/* Our only slot */
+				slot_list[0] = KEYCHAIN_SLOT;/* Our only slot */
 		}
 		*slot_num = 1;
 	} else {
@@ -369,8 +372,115 @@ out:
 	return rv;
 }
 
-NOTSUPPORTED(C_GetSlotInfo, (CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info))
-NOTSUPPORTED(C_GetTokenInfo, (CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info))
+/*
+ * Return information about a "slot"
+ */
+
+CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
+{
+	FUNCINITCHK(C_GetInfo);
+
+	os_log_debug(logsys, "slot_id = %d, slot_info = %p", (int) slot_id,
+		     slot_info);
+
+	/*
+	 * Right now, we only have a single slot
+	 */
+
+	if (slot_id != KEYCHAIN_SLOT)
+		return CKR_SLOT_ID_INVALID;
+
+	if (! slot_info)
+		return CKR_ARGUMENTS_BAD;
+
+	/*
+	 * We can't really get any useful information out of the Security
+	 * framework in terms of information about the "slot" (the reader).
+	 * I don't really think it is useful anyway, so just fill in some
+	 * dummy values.  The one valid thing we return is the
+	 * CKF_TOKEN_PRESENT flag if we have a token inserted or not.
+	 */
+
+	sprintfpad(slot_info->slotDescription,
+		  sizeof(slot_info->slotDescription), "%s",
+		  "Keychain PKCS#11 Bridge Library Virtual Slot");
+	sprintfpad(slot_info->manufacturerID,
+		   sizeof(slot_info->slotDescription), "%s",
+		   "U.S. Naval Research Lab");
+
+	slot_info->flags = CKF_HW_SLOT;
+
+	if (id_list_count > 0)
+		slot_info->flags |= CKF_TOKEN_PRESENT;
+
+	slot_info->hardwareVersion.major = 1;
+	slot_info->hardwareVersion.minor = 0;
+	slot_info->firmwareVersion.major = 1;
+	slot_info->firmwareVersion.minor = 0;
+
+	return CKR_OK;
+}
+
+/*
+ * Return information about a token.  Most of this stuff is fabricated;
+ * a lot of it doesn't matter, as it deals with things we don't support.
+ */
+
+CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
+{
+	FUNCINITCHK(C_GetInfo);
+
+	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
+		     token_info);
+
+	/*
+	 * Right now, we only have a single slot
+	 */
+
+	if (slot_id != KEYCHAIN_SLOT)
+		return CKR_SLOT_ID_INVALID;
+
+	if (! token_info)
+		return CKR_ARGUMENTS_BAD;
+
+	sprintfpad(token_info->label, sizeof(token_info->label), "%s",
+		   "Keychain PKCS#11 Virtual Token");
+	sprintfpad(token_info->manufacturerID,
+		   sizeof(token_info->manufacturerID), "%s",
+		   "Unknown Manufacturer");
+	sprintfpad(token_info->model, sizeof(token_info->model), "%s",
+		   "Unknown Model");
+	sprintfpad(token_info->serialNumber, sizeof(token_info->serialNumber),
+		   "%s", "000001");
+	/*
+	 * We can't do any administrative operations, really, from the
+	 * Security framework, so basically make it so the token is
+	 * read/only.  Right now we set CKF_PROTECTED_AUTHENTICATION_PATH
+	 * which means we will count on the Security framework on popping
+	 * up a user dialog to ask for the PIN; we might change that later.
+	 */
+	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
+			    CKF_USER_PIN_INITIALIZED |
+			    CKF_PROTECTED_AUTHENTICATION_PATH |
+			    CKF_TOKEN_INITIALIZED;
+	token_info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
+	token_info->ulSessionCount = CK_EFFECTIVELY_INFINITE;
+	token_info->ulMaxRwSessionCount = 0;
+	token_info->ulRwSessionCount = 0;
+	token_info->ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION;
+	token_info->ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION;
+	token_info->ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION;
+	token_info->ulFreePrivateMemory = CK_UNAVAILABLE_INFORMATION;
+	token_info->hardwareVersion.major = 1;
+	token_info->hardwareVersion.minor = 0;
+	token_info->firmwareVersion.major = 1;
+	token_info->firmwareVersion.minor = 0;
+	sprintfpad(token_info->utcTime, sizeof(token_info->utcTime),
+		   "%s", "1970010100000000");
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_GetMechanismList, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist, CK_ULONG_PTR mechnum))
 NOTSUPPORTED(C_GetMechanismInfo, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype, CK_MECHANISM_INFO_PTR mechinfo))
 NOTSUPPORTED(C_InitToken, (CK_SLOT_ID slot_id, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen, CK_UTF8CHAR_PTR label))
