@@ -452,7 +452,7 @@ int main(int argc, char *argv[]) {
 	    if (rv != CKR_OK)
 		continue;
 	    switch(ulValue) {
-            case CKA_TOKEN:
+            case CKO_DATA:
 		dump_attrs(p11p, hSession, phObject[i], NULL, &app_attr,
 			   &objid_attr, &value_attr, (void *) NULL);
 		break;
