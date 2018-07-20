@@ -492,7 +492,7 @@ CK_RV login(CK_FUNCTION_LIST_PTR p11p, CK_TOKEN_INFO_PTR tInfo, CK_SESSION_HANDL
 
     if (tInfo->flags & CKF_PROTECTED_AUTHENTICATION_PATH) {
 	printf("Protected authentication path found, not prompting PIN\n");
-	return CKR_OK;
+	return p11p->C_Login(hSession, admin == 1 ? CKU_SO : CKU_USER, NULL, 0);
     }
 
     if (passwordLen > 0 && password != NULL && passwordLen <= pinLen) {
