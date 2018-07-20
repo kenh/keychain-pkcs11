@@ -15,6 +15,8 @@ check_PROGRAMS = pkcs11_test
 
 keychain_pkcs11_la_SOURCES = \
 			keychain_pkcs11.c \
+			debug.c \
+			debug.h \
 			mypkcs11.h \
 			pkcs11.h \
 			pkcs11f.h \
@@ -30,3 +32,8 @@ keychain_pkcs11_la_LDFLAGS = \
 			#
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h
+#
+# We add this here so debug.c will be compiled with a different object
+# name and not conflict with the use of debug.c in the shared library.
+#
+pkcs11_test_CFLAGS = $(AM_CFLAGS)

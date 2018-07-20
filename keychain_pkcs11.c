@@ -90,6 +90,8 @@ static void free_objects(void);
 static CK_ATTRIBUTE_PTR	search_attrs = NULL;
 static unsigned int search_attrs_count = 0;
 static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
+static CK_ATTRIBUTE_PTR find_attribute(struct obj_info *, CK_ATTRIBUTE_TYPE);
+static void dump_attribute(const char *, CK_ATTRIBUTE_PTR);
 
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
@@ -615,7 +617,56 @@ NOTSUPPORTED(C_CreateObject, (CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR templa
 NOTSUPPORTED(C_CopyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR new_object))
 NOTSUPPORTED(C_DestroyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object))
 NOTSUPPORTED(C_GetObjectSize, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ULONG_PTR size))
-NOTSUPPORTED(C_GetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG count))
+
+/*
+ * Return the value of an attribute for an object
+ */
+
+CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
+			  CK_ATTRIBUTE_PTR template, CK_ULONG count)
+{
+	CK_RV rv = CKR_OK;
+	int i;
+	CK_ATTRIBUTE_PTR attr;
+
+	FUNCINITCHK(C_GetAttributeValue);
+
+	os_log_debug(logsys, "session = %d, object = %d, template = %p, "
+		     "count = %d", (int) session, (int) object, template,
+		     (int) count);
+
+	if (object >= obj_list_count)
+		return CKR_OBJECT_HANDLE_INVALID;
+
+	for (i = 0; i < count; i++) {
+		os_log_debug(logsys, "Retrieving attribute: %s",
+			     getCKAName(template[i].type));
+		if ((attr = find_attribute(&obj_list[object],
+					   template[i].type))) {
+			if (! template[i].pValue) {
+				template[i].ulValueLen = attr->ulValueLen;
+			} else {
+				if (template[i].ulValueLen < attr->ulValueLen) {
+					template[i].ulValueLen =
+							attr->ulValueLen;
+					rv = CKR_BUFFER_TOO_SMALL;
+				} else {
+					memcpy(template[i].pValue, attr->pValue,
+					       attr->ulValueLen);
+					template[i].ulValueLen =
+							attr->ulValueLen;
+				}
+			}
+		} else {
+			os_log_debug(logsys, "Attribute not found");
+			template[i].ulValueLen = CK_UNAVAILABLE_INFORMATION;
+			rv = CKR_ATTRIBUTE_TYPE_INVALID;
+		}
+	}
+
+	return rv;
+}
+
 NOTSUPPORTED(C_SetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG count))
 
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
@@ -650,6 +701,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 			memcpy(search_attrs[i].pValue, template[i].pValue,
 			       search_attrs[i].ulValueLen);
 		}
+		dump_attribute("Search template", &search_attrs[i]);
 	}
 
 	return CKR_OK;
@@ -1289,6 +1341,7 @@ build_objects(void)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
+	CK_CERTIFICATE_TYPE ct = CKC_X_509;	/* Only this for now */
 	CK_ULONG t;
 	CK_BBOOL b;
 	CFDataRef d;
@@ -1324,6 +1377,7 @@ do { \
 		cl = CKO_CERTIFICATE;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
+		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
 		d = SecCertificateCopyNormalizedSubjectSequence(cert);
 		ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
@@ -1347,6 +1401,7 @@ do { \
 		cl = CKO_PUBLIC_KEY;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
+		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
 		b = id_list[i].pubcanencrypt;
 		ADD_ATTR(CKA_ENCRYPT, b);
 		b = id_list[i].pubcanverify;
@@ -1358,6 +1413,7 @@ do { \
 		cl = CKO_PRIVATE_KEY;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
+		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
 		b = id_list[i].privcandecrypt;
 		ADD_ATTR(CKA_DECRYPT, b);
 		b = id_list[i].privcansign;
@@ -1447,4 +1503,42 @@ next:	;
 	}
 
 	return true;
+}
+
+/*
+ * Search an object for a particular attribute; return NULL if not found
+ */
+
+static CK_ATTRIBUTE_PTR
+find_attribute(struct obj_info *obj, CK_ATTRIBUTE_TYPE type)
+{
+	int i;
+
+	for (i = 0; i < obj->attr_count; i++)
+		if (obj->attrs[i].type == type)
+			return &obj->attrs[i];
+
+	return NULL;
+}
+
+/*
+ * Output information about an attribute
+ */
+
+static void
+dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
+{
+	if (!os_log_debug_enabled(logsys))
+		return;
+
+	switch (attr->type) {
+	case CKA_CLASS:
+		os_log_debug(logsys, "%s: CKA_CLASS: %s", str,
+			     getCKOName(*((CK_OBJECT_CLASS *) attr->pValue)));
+		break;
+	default:
+		os_log_debug(logsys, "%s: %s, len = %lu, val = %p", str,
+			     getCKAName(attr->type), attr->ulValueLen,
+					attr->pValue);
+	}
 }
