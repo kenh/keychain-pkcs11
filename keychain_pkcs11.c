@@ -68,7 +68,6 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
  */
 
 struct obj_info {
-	CK_OBJECT_CLASS 	class;
 	unsigned int		id_index;
 	unsigned char		id_value[sizeof(CK_ULONG)];
 	CK_ATTRIBUTE_PTR	attrs;
@@ -79,9 +78,18 @@ struct obj_info {
 static struct obj_info *obj_list = NULL;
 static unsigned int obj_list_count = 0;
 static unsigned int obj_list_size = 0;
+static unsigned int obj_search_index = 0;
 
 static void build_objects(void);
 static void free_objects(void);
+
+/*
+ * Our attribute list used for searching
+ */
+
+static CK_ATTRIBUTE_PTR	search_attrs = NULL;
+static unsigned int search_attrs_count = 0;
+static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
 
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
@@ -613,16 +621,91 @@ NOTSUPPORTED(C_SetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE o
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 			CK_ULONG count)
 {
-	FUNCINITCHK(C_Login);
+	int i;
+
+	FUNCINITCHK(C_FindObjectsInit);
 
 	os_log_debug(logsys, "session = %d, template = %p, count = %lu",
 		     (int) session, template, count);
 
+	if (obj_list_count == 0)
+		build_objects();
+
+	obj_search_index = 0;
+
+	/*
+	 * Copy all of our attributes to search against later
+	 */
+
+	search_attrs = count ?  malloc(sizeof(CK_ATTRIBUTE) * count) : NULL;
+	search_attrs_count = count;
+
+	for (i = 0; i < count; i++) {
+		search_attrs[i].type = template[i].type;
+		search_attrs[i].ulValueLen = template[i].ulValueLen;
+		if (search_attrs[i].ulValueLen == CK_UNAVAILABLE_INFORMATION) {
+			search_attrs[i].pValue = NULL;
+		} else {
+			search_attrs[i].pValue = malloc(search_attrs[i].ulValueLen);
+			memcpy(search_attrs[i].pValue, template[i].pValue,
+			       search_attrs[i].ulValueLen);
+		}
+	}
+
 	return CKR_OK;
 }
 
-NOTSUPPORTED(C_FindObjects, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object, CK_ULONG maxcount, CK_ULONG_PTR count))
-NOTSUPPORTED(C_FindObjectsFinal, (CK_SESSION_HANDLE session))
+/*
+ * Return object identifiers that match our search template.  Right now we
+ * ignore the session handle, but we'll fix that later.
+ */
+
+CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
+		    CK_ULONG maxcount, CK_ULONG_PTR count)
+{
+	unsigned int rc = 0;
+
+	FUNCINITCHK(C_FindObjects);
+
+	os_log_debug(logsys, "session = %d, objhandle = %p, maxcount = %lu, "
+		     "count = %p", (int) session, object, maxcount, count);
+
+	if (! object || maxcount == 0)
+		return CKR_ARGUMENTS_BAD;
+
+	for (; obj_search_index < obj_list_count; obj_search_index++) {
+		if (search_object(&obj_list[obj_search_index], search_attrs,
+				  search_attrs_count)) {
+			object[rc++] = obj_search_index;
+			if (rc >= maxcount) {
+				*count = rc;
+				return CKR_OK;
+			}
+		}
+	}
+
+	*count = rc;
+
+	return CKR_OK;
+}
+
+CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE session)
+{
+	int i;
+
+	FUNCINITCHK(C_FindObjectsFinal);
+
+	os_log_debug(logsys, "session = %d", (int) session);
+
+	for (i = 0; i < search_attrs_count; i++)
+		free(search_attrs[i].pValue);
+
+	free(search_attrs);
+	search_attrs_count = 0;
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_EncryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_Encrypt, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR outdata, CK_ULONG_PTR outdatalen))
 NOTSUPPORTED(C_EncryptUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR inpart, CK_ULONG inpartlen, CK_BYTE_PTR outpart, CK_ULONG_PTR outpartlen))
@@ -981,12 +1064,6 @@ id_list_free(void)
 }
 
 /*
- * Build an array of objects we can search using FindObject
- */
-
-
-
-/*
  * A version of snprintf() which does space-padding
  */
 
@@ -1180,46 +1257,113 @@ convert_keytype(CFNumberRef type)
  * Build our list of objects based on our identities
  */
 
-#define ADD_ATTR(attr, ptr, type) \
-{ \
-	type v; \
-	size_t s = sizeof(type); \
-	void *p = malloc(s); \
+#define ADD_ATTR_SIZE(attribute, var, size) \
+do { \
+	void *p = malloc(size); \
+	memcpy(p, var, size); \
 	if (obj_list[obj_list_count].attr_count >= \
 	    obj_list[obj_list_count].attr_size) { \
 		obj_list[obj_list_count].attr_size += 5; \
-		obj_list[obj_list_count].attr = realloc(obj_list[obj_list_count].attr, \
-					obj_list[obj_list_count].attr_size); \
+		obj_list[obj_list_count].attrs = realloc(obj_list[obj_list_count].attrs, \
+			obj_list[obj_list_count].attr_size * sizeof(CK_ATTRIBUTE)); \
 	} \
-	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].type = attr; \
-	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].pValue = p; \
-	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].ulValueLen = s; \
-}
+	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].type = attribute; \
+	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].pValue = p; \
+	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].ulValueLen = size; \
+	obj_list[obj_list_count].attr_count++; \
+} while (0)
+
+#define ADD_ATTR(attr, var) ADD_ATTR_SIZE(attr, &var, sizeof(var))
+
+#define NEW_OBJECT() \
+do { \
+	if (++obj_list_count >= obj_list_size) { \
+		obj_list_size += 5; \
+		obj_list = realloc(obj_list, obj_list_size * sizeof(*obj_list)); \
+	} \
+} while (0)
+
 
 static void
 build_objects(void)
 {
 	int i;
+	CK_OBJECT_CLASS cl;
+	CK_ULONG t;
+	CK_BBOOL b;
+	CFDataRef d;
 
 	if (obj_list_count > 0)
 		free_objects();
 
-	for (i = 0; i < id_list_count; i++) {
-		if (obj_list_count >= obj_list_size) {
-			obj_list_size += 5;
-			obj_list = realloc(obj_list,
-					   obj_list_size * sizeof(*obj_list));
-		}
+	if (id_list_count > 0) {
+		/* Prime the pump */
+		NEW_OBJECT();
+		obj_list_count--;
+	}
 
-		obj_list[obj_list_count].attrs = NULL;
-		obj_list[obj_list_count].attr_count = 0;
-		obj_list[obj_list_count].attr_size = 0;
+	for (i = 0; i < id_list_count; i++) {
+		SecCertificateRef cert = id_list[i].cert;
+
+#define OBJINIT() \
+do { \
+	obj_list[obj_list_count].id_index = i; \
+	obj_list[obj_list_count].attrs = NULL; \
+	obj_list[obj_list_count].attr_count = 0; \
+	obj_list[obj_list_count].attr_size = 0; \
+} while (0)
+
+		OBJINIT();
 
 		/*
 		 * Add in the object for each identity; cert, public key,
-		 * private key.
+		 * private key.  Add in attributes we need.
 		 */
 
+		t = i;
+		cl = CKO_CERTIFICATE;
+		ADD_ATTR(CKA_CLASS, cl);
+		ADD_ATTR(CKA_ID, t);
+		d = SecCertificateCopyNormalizedSubjectSequence(cert);
+		ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(d),
+			      CFDataGetLength(d));
+		CFRelease(d);
+		d = SecCertificateCopyNormalizedIssuerSequence(cert);
+		ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(d),
+			      CFDataGetLength(d));
+		CFRelease(d);
+		d = SecCertificateCopySerialNumberData(cert, NULL);
+		ADD_ATTR_SIZE(CKA_SERIAL_NUMBER, CFDataGetBytePtr(d),
+			      CFDataGetLength(d));
+		CFRelease(d);
+		d = SecCertificateCopyData(cert);
+		ADD_ATTR_SIZE(CKA_VALUE, CFDataGetBytePtr(d),
+			      CFDataGetLength(d));
+		CFRelease(d);
+
+		NEW_OBJECT();
+		OBJINIT();
+
+		cl = CKO_PUBLIC_KEY;
+		ADD_ATTR(CKA_CLASS, cl);
+		ADD_ATTR(CKA_ID, t);
+		b = id_list[i].pubcanencrypt;
+		ADD_ATTR(CKA_ENCRYPT, b);
+		b = id_list[i].pubcanverify;
+		ADD_ATTR(CKA_VERIFY, b);
+
+		NEW_OBJECT();
+		OBJINIT();
+
+		cl = CKO_PRIVATE_KEY;
+		ADD_ATTR(CKA_CLASS, cl);
+		ADD_ATTR(CKA_ID, t);
+		b = id_list[i].privcandecrypt;
+		ADD_ATTR(CKA_DECRYPT, b);
+		b = id_list[i].privcansign;
+		ADD_ATTR(CKA_SIGN, b);
+
+		NEW_OBJECT();
 	}
 }
 
@@ -1239,4 +1383,68 @@ free_objects(void)
 	free(obj_list);
 
 	obj_list_count = obj_list_size = 0;
+}
+
+/*
+ * Search an object to see if our attributes match.  If we have no
+ * attributes then that counts as a match.
+ */
+
+static bool
+search_object(struct obj_info *obj, CK_ATTRIBUTE_PTR attrs,
+	      unsigned int attrcount)
+{
+	int i, j;
+
+	/*
+	 * If we get a valid "hit", then goto next to continue the
+	 * attrs loop; if we make to the end of the attrs loop then
+	 * we can return 'true'
+	 */
+
+	for (i = 0; i < attrcount; i++) {
+		for (j = 0; j < obj->attr_count; j++)
+			/*
+			 * For a match, the type has to be the same, both
+			 * have to have the same length, and either both
+			 * are NULL pointers or both have the same contents
+			 */
+			if (obj->attrs[j].type == attrs[i].type &&
+			    obj->attrs[j].ulValueLen == attrs[i].ulValueLen) {
+			    	/*
+				 * We are assuming that we only have one
+				 * copy of an attribute in an object.  So
+				 * if the attribute doesn't match then
+				 * we can short-circuit the match now
+				 */
+				if ((obj->attrs[j].pValue == NULL ||
+				     attrs[i].pValue == NULL) &&
+				    (obj->attrs[j].pValue != attrs[i].pValue))
+					return false;
+				else
+					goto next;
+				/*
+				 * Both are valid pointers and have the same
+				 * length, so do a memcmp().  But again, if
+				 * doesn't match than return false.
+				 */
+				if (memcmp(obj->attrs[j].pValue,
+					   attrs[i].pValue,
+					   attrs[i].ulValueLen) == 0)
+					goto next;
+				else
+					return false;
+			}
+
+		/*
+		 * If we made it here then that means we went through
+		 * every attribute in this object and didn't find a match
+		 * so we can return false now.
+		 */
+
+		return false;
+next:	;
+	}
+
+	return true;
 }
