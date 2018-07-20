@@ -33,15 +33,14 @@
 struct id_info {
 	SecIdentityRef		ident;
 	SecCertificateRef	cert;
-	SecKeyRef		key;
+	SecKeyRef		privkey;
+	SecKeyRef		pubkey;
 	CK_KEY_TYPE		keytype;
 	char *			label;
 	bool			privcansign;
 	bool			privcandecrypt;
-/*
-	bool			canverify;
-	bool			canencrypt;
-*/
+	bool			pubcanverify;
+	bool			pubcanencrypt;
 };
 
 static struct id_info *id_list = NULL;
@@ -53,6 +52,36 @@ static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
+
+/*
+ * Our object list and the functions to handle them
+ *
+ * The object types we support are:
+ *
+ * Certificates (CKO_CERTFICATE).  We only support X.509 certificates
+ * Public keys (CKO_PUBLIC_KEY).
+ * Private keys (CKO_PRIVATE_KEY).
+ * 
+ * The general rule is the CKA_ID attribute for any of those should all
+ * match for a given identity.  I implemented this so the CKA_ID
+ * is a CK_ULONG that is an index into our identity array.
+ */
+
+struct obj_info {
+	CK_OBJECT_CLASS 	class;
+	unsigned int		id_index;
+	unsigned char		id_value[sizeof(CK_ULONG)];
+	CK_ATTRIBUTE_PTR	attrs;
+	unsigned int		attr_count;
+	unsigned int		attr_size;
+};
+
+static struct obj_info *obj_list = NULL;
+static unsigned int obj_list_count = 0;
+static unsigned int obj_list_size = 0;
+
+static void build_objects(void);
+static void free_objects(void);
 
 /*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
@@ -407,7 +436,8 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 	sprintfpad(slot_info->slotDescription,
 		  sizeof(slot_info->slotDescription), "%s",
-		  "Keychain PKCS#11 Bridge Library Virtual Slot");
+		  id_list_count > 0 ? id_list[0].label :
+		  	"Keychain PKCS#11 Bridge Library Virtual Slot");
 	sprintfpad(slot_info->manufacturerID,
 		   sizeof(slot_info->slotDescription), "%s",
 		   "U.S. Naval Research Lab");
@@ -579,7 +609,18 @@ NOTSUPPORTED(C_DestroyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE objec
 NOTSUPPORTED(C_GetObjectSize, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ULONG_PTR size))
 NOTSUPPORTED(C_GetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG count))
 NOTSUPPORTED(C_SetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG count))
-NOTSUPPORTED(C_FindObjectsInit, (CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template, CK_ULONG count))
+
+CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
+			CK_ULONG count)
+{
+	FUNCINITCHK(C_Login);
+
+	os_log_debug(logsys, "session = %d, template = %p, count = %lu",
+		     (int) session, template, count);
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_FindObjects, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object, CK_ULONG maxcount, CK_ULONG_PTR count))
 NOTSUPPORTED(C_FindObjectsFinal, (CK_SESSION_HANDLE session))
 NOTSUPPORTED(C_EncryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
@@ -793,6 +834,7 @@ add_identity(CFDictionaryRef dict)
 {
 	CFStringRef label;
 	CFNumberRef keytype;
+	CFDictionaryRef keydict;
 	OSStatus ret;
 	int i = id_list_count;
 
@@ -807,7 +849,8 @@ add_identity(CFDictionaryRef dict)
 
 	id_list[i].ident = NULL;
 	id_list[i].cert = NULL;
-	id_list[i].key = NULL;
+	id_list[i].privkey = NULL;
+	id_list[i].pubkey = NULL;
 	id_list[i].label = NULL;
 
 	/*
@@ -865,9 +908,30 @@ add_identity(CFDictionaryRef dict)
 
 	if (! ret) {
 		ret = SecIdentityCopyPrivateKey(id_list[i].ident,
-						&id_list[i].key);
+						&id_list[i].privkey);
 		if (ret)
 			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+	}
+
+	if ( !ret) {
+		ret = SecCertificateCopyPublicKey(id_list[i].cert,
+						  &id_list[i].pubkey);
+		if (ret)
+			LOG_SEC_ERR("CopyPublicKey failed: %@", ret);
+	}
+
+	/*
+	 * Get our public key attributes
+	 */
+
+	if (! ret) {
+		keydict = SecKeyCopyAttributes(id_list[i].pubkey);
+
+		id_list[i].pubcanverify = boolfromdict("Can-Verify", keydict,
+						        kSecAttrCanVerify);
+		id_list[i].pubcanencrypt = boolfromdict("Can-Encrypt", keydict,
+							kSecAttrCanEncrypt);
+		CFRelease(keydict);
 	}
 
 	if (ret)
@@ -900,8 +964,10 @@ id_list_free(void)
 			free(id_list[i].label);
 		if (id_list[i].ident)
 			CFRelease(id_list[i].ident);
-		if (id_list[i].key)
-			CFRelease(id_list[i].key);
+		if (id_list[i].privkey)
+			CFRelease(id_list[i].privkey);
+		if (id_list[i].pubkey)
+			CFRelease(id_list[i].pubkey);
 		if (id_list[i].cert)
 			CFRelease(id_list[i].cert);
 	}
@@ -913,6 +979,12 @@ id_list_free(void)
 	id_list_count = id_list_size = 0;
 	id_list_init = false;
 }
+
+/*
+ * Build an array of objects we can search using FindObject
+ */
+
+
 
 /*
  * A version of snprintf() which does space-padding
@@ -1060,6 +1132,27 @@ dumpdict(const char *string, CFDictionaryRef dict)
  * many.
  */
 
+/*
+ * Because we have to have compile-time constants in a statically-declared
+ * initializer, we are declaring the Security framework key type attributes
+ * as POINTERS to the attributes (those can be resolved at link time).
+ * We dereference them when we need them below.
+ */
+
+static struct {
+	const char *keyname;
+	CK_KEY_TYPE pkcs11_keytype;
+	const CFStringRef *sec_keytype;
+} keytype_map[] = {
+	{ "RSA Key", CKK_RSA, &kSecAttrKeyTypeRSA },
+	{ "DSA Key", CKK_DSA, &kSecAttrKeyTypeDSA },
+	{ "AES Key", CKK_AES, &kSecAttrKeyTypeAES },
+	{ "DES Key", CKK_DES, &kSecAttrKeyTypeDES },
+	{ "3DES Key", CKK_DES3, &kSecAttrKeyType3DES },
+	{ "EC Key", CKK_EC, &kSecAttrKeyTypeEC },
+	{ NULL, 0, NULL },
+};
+
 static CK_KEY_TYPE
 convert_keytype(CFNumberRef type)
 {
@@ -1067,22 +1160,8 @@ convert_keytype(CFNumberRef type)
 	CFStringRef str = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"),
 						   type);
 
-	const struct {
-		const char *keyname;
-		CK_KEY_TYPE pkcs11_keytype;
-		CFStringRef sec_keytype;
-	} keytype_map[] = {
-		{ "RSA Key", CKK_RSA, kSecAttrKeyTypeRSA },
-		{ "DSA Key", CKK_DSA, kSecAttrKeyTypeDSA },
-		{ "AES Key", CKK_AES, kSecAttrKeyTypeAES },
-		{ "DES Key", CKK_DES, kSecAttrKeyTypeDES },
-		{ "3DES Key", CKK_DES3, kSecAttrKeyType3DES },
-		{ "EC Key", CKK_EC, kSecAttrKeyTypeEC },
-		{ NULL, 0, NULL },
-	};
-
 	for (i = 0; keytype_map[i].keyname; i++) {
-		if (CFEqual(str, keytype_map[i].sec_keytype)) {
+		if (CFEqual(str, *keytype_map[i].sec_keytype)) {
 			os_log_debug(logsys, "This is a %s",
 				     keytype_map[i].keyname);
 			CFRelease(str);
@@ -1095,4 +1174,69 @@ convert_keytype(CFNumberRef type)
 	os_log_debug(logsys, "Keytype is unknown, returning VENDOR_DEFINED");
 
 	return CKK_VENDOR_DEFINED;
+}
+
+/*
+ * Build our list of objects based on our identities
+ */
+
+#define ADD_ATTR(attr, ptr, type) \
+{ \
+	type v; \
+	size_t s = sizeof(type); \
+	void *p = malloc(s); \
+	if (obj_list[obj_list_count].attr_count >= \
+	    obj_list[obj_list_count].attr_size) { \
+		obj_list[obj_list_count].attr_size += 5; \
+		obj_list[obj_list_count].attr = realloc(obj_list[obj_list_count].attr, \
+					obj_list[obj_list_count].attr_size); \
+	} \
+	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].type = attr; \
+	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].pValue = p; \
+	obj_list[obj_list_count].attr[obj_list[obj_list_count].attr_count].ulValueLen = s; \
+}
+
+static void
+build_objects(void)
+{
+	int i;
+
+	if (obj_list_count > 0)
+		free_objects();
+
+	for (i = 0; i < id_list_count; i++) {
+		if (obj_list_count >= obj_list_size) {
+			obj_list_size += 5;
+			obj_list = realloc(obj_list,
+					   obj_list_size * sizeof(*obj_list));
+		}
+
+		obj_list[obj_list_count].attrs = NULL;
+		obj_list[obj_list_count].attr_count = 0;
+		obj_list[obj_list_count].attr_size = 0;
+
+		/*
+		 * Add in the object for each identity; cert, public key,
+		 * private key.
+		 */
+
+	}
+}
+
+/*
+ * Free our object list and all associated data
+ */
+
+static void
+free_objects(void)
+{
+	int i, j;
+
+	for (i = 0; i < obj_list_count; i++)
+		for (j = 0; j < obj_list[i].attr_count; j++)
+			free(obj_list[i].attrs[j].pValue);
+
+	free(obj_list);
+
+	obj_list_count = obj_list_size = 0;
 }
