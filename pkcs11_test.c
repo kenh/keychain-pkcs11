@@ -643,7 +643,7 @@ dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 	template.ulValueLen = 0;
 	rv = p11p->C_GetAttributeValue(session, obj, &template, 1);
 	if (rv != CKR_OK) {
-	    printf("%s: C_GetAttributeValue returned %lu", ah->label, rv);
+	    printf("%s: C_GetAttributeValue returned %lu\n", ah->label, rv);
 	    rvret = rv;
 	    continue;
 	}
@@ -654,7 +654,7 @@ dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 	template.pValue = malloc(template.ulValueLen);
 	rv = p11p->C_GetAttributeValue(session, obj, &template, 1);
 	if (rv != CKR_OK) {
-	    printf("%s: Second call to C_GetAttributeValue failed: %lu",
+	    printf("%s: Second call to C_GetAttributeValue failed: %lu\n",
 		   ah->label, rv);
 	    free(template.pValue);
 	    rvret = rv;
