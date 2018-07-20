@@ -320,7 +320,7 @@ const char * getCKMName(CK_MECHANISM_TYPE mech) {
         case CKM_TLS_PRF_GENERAL: return "CKM_TLS_PRF_GENERAL";
 
         default:
-            return "";
+            return "Unknown Key Type";
     }
 }
 
@@ -464,7 +464,7 @@ const char * getCKAName(CK_ATTRIBUTE_TYPE attrib) {
         case CKA_NETSCAPE_TRUST: return "CKA_NETSCAPE_TRUST";
 
         default:
-            return "";
+            return "Unknown Attribute Type";
     }
 }
 
@@ -490,7 +490,7 @@ const char * getCKOName(CK_OBJECT_CLASS class) {
         case CKO_NSS_DELSLOT: return "CKO_NSS_DELSLOT";
 
         default:
-            return "";
+            return "Unknown Object Type";
     }
 }
 
@@ -604,7 +604,7 @@ const char * getCKCName(CK_CERTIFICATE_TYPE ctype) {
            /** Netscap Specific **/
         case CKC_NSS: return "CKC_NSS";
         default:
-            return "";
+            return "Unknown Certificate Type";
     }
 }
 
