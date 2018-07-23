@@ -138,7 +138,7 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "n:S:s:")) != -1) {
+    while ((i = getopt(argc, argv, "n:o:S:s:")) != -1) {
 	switch (i) {
 	case 'n':
 #ifdef HAVE_SETPROGNAME
