@@ -130,11 +130,15 @@ int main(int argc, char *argv[]) {
     CK_SLOT_ID_PTR slotList = NULL;
     CK_SLOT_ID validSlot = -1;
     CK_SLOT_INFO slotInfo;
+    CK_OBJECT_HANDLE sObject = -1;
+    CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
+
+    char *signstring = NULL;
 
 
     int i;
 
-    while ((i = getopt(argc, argv, "n:s:")) != -1) {
+    while ((i = getopt(argc, argv, "n:S:s:")) != -1) {
 	switch (i) {
 	case 'n':
 #ifdef HAVE_SETPROGNAME
@@ -144,10 +148,17 @@ int main(int argc, char *argv[]) {
 	case 's':
 	    slot = atoi(optarg);
 	    break;
+	case 'S':
+	    signstring = optarg;
+	    break;
+	case 'o':
+	    sObject = atoi(optarg);
+	    break;
 	case '?':
 	default:
 	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
-		    "[pkcs11_library]\n", argv[0]);
+		    "[-S string-to-sign] [-o object] [pkcs11_library]\n",
+		    argv[0]);
 	    exit(1);
 	}
     }
@@ -248,7 +259,7 @@ int main(int argc, char *argv[]) {
         printf("Slot supports removeable tokens: %s\n", (sInfo.flags & CKF_REMOVABLE_DEVICE ? "yes" : "no"));
         printf("Slot is a hardware slot: %s\n", (sInfo.flags & CKF_HW_SLOT ? "yes" : "no"));
     } else {
-        fprintf(stderr, "Error getting slot info (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Error getting slot info (rv = %s)\n", getCKRName(rv));
     }
 
     memset(&tInfo, 0, sizeof(tInfo));
@@ -452,7 +463,69 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsFinal(hSession);
 
+    cls = CKO_PUBLIC_KEY;
+    attrs[0].type = CKA_CLASS;
+    attrs[0].pValue = &cls;
+    attrs[0].ulValueLen = sizeof cls;
 
+    rv = p11p->C_FindObjectsInit(hSession, attrs, 1);
+    if (rv != CKR_OK) {
+        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
+        (void)p11p->C_CloseSession(hSession);
+        goto cleanup;
+    }
+
+    do {
+	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+	if (rv != CKR_OK) {
+		fprintf(stderr, "Error Finding Objects (rv = %X)\n",
+			(unsigned int) rv);
+		(void)p11p->C_CloseSession(hSession);
+		goto cleanup;
+	}
+	fprintf(stderr, "Found %d objects\n", (int) count);
+
+	for(i = 0; i < count; i++) {
+	    printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
+	    rv = dump_attrs(p11p, hSession, phObject[i], &ulValue, &class_attr,
+			    &id_attr, (void *) NULL);
+	}
+    } while (count > 0);
+
+    rv = p11p->C_FindObjectsFinal(hSession);
+
+    cls = CKO_PRIVATE_KEY;
+    attrs[0].type = CKA_CLASS;
+    attrs[0].pValue = &cls;
+    attrs[0].ulValueLen = sizeof cls;
+
+    rv = p11p->C_FindObjectsInit(hSession, attrs, 1);
+    if (rv != CKR_OK) {
+        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
+        (void)p11p->C_CloseSession(hSession);
+        goto cleanup;
+    }
+
+    do {
+	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+	if (rv != CKR_OK) {
+		fprintf(stderr, "Error Finding Objects (rv = %X)\n",
+			(unsigned int) rv);
+		(void)p11p->C_CloseSession(hSession);
+		goto cleanup;
+	}
+	fprintf(stderr, "Found %d objects\n", (int) count);
+
+	for(i = 0; i < count; i++) {
+	    printf("Object[%d] handle: %u\n", i, (unsigned int) phObject[i]);
+	    if (sObject == -1)
+		sObject = phObject[i];
+	    rv = dump_attrs(p11p, hSession, phObject[i], &ulValue, &class_attr,
+			    &id_attr, (void *) NULL);
+	}
+    } while (count > 0);
+
+    rv = p11p->C_FindObjectsFinal(hSession);
 
     cls = CKA_VENDOR_DEFINED; //type CK_OBJECT_CLASS
     attrs[0].type = CKA_CLASS;
@@ -495,7 +568,32 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsFinal(hSession);
 
+    if (signstring) {
+	unsigned char data[1024];
+	CK_ULONG datalen = sizeof(data);
+	CK_MECHANISM mech = { sMech, NULL, 0 };
 
+	rv = p11p->C_SignInit(hSession, &mech, sObject);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "Error starting signature operation (rv = %s)\n",
+		    getCKRName(rv));
+	    exit(1);
+	}
+
+	rv = p11p->C_Sign(hSession, (unsigned char *) signstring,
+			  strlen(signstring), data, &datalen);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "C_Sign failed (rv =  %s)\n", getCKRName(rv));
+	    exit(1);
+	}
+
+	printf("Digest size = %lu, data = ", datalen);
+	for (i = 0; i < datalen; i++)
+	    printf("%02x", data[i]);
+	printf("\n");
+    }
 
 #if 0
 
@@ -585,7 +683,8 @@ CK_RV load_library(char *library, CK_FUNCTION_LIST_PTR *p11p) {
 
     rv = (*getflist)(p11p);
     if (rv != CKR_OK) {
-        printf("Error calling \"C_GetFunctionList\" (rv = %d)\n", (int) rv);
+        printf("Error calling \"C_GetFunctionList\" (rv = %s)\n",
+	       getCKRName(rv));
         return(rv);
     }
     return(CKR_OK);
