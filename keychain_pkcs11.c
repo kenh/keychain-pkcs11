@@ -612,7 +612,17 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	return CKR_OK;
 }
 
-NOTSUPPORTED(C_Logout, (CK_SESSION_HANDLE session))
+CK_RV C_Logout(CK_SESSION_HANDLE session)
+{
+	FUNCINITCHK(C_Login);
+
+	os_log_debug(logsys, "session = %d", (int) session);
+
+	/* Right now a no-op */
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_CreateObject, (CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR object))
 NOTSUPPORTED(C_CopyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR new_object))
 NOTSUPPORTED(C_DestroyObject, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object))
@@ -688,7 +698,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 	 * Copy all of our attributes to search against later
 	 */
 
-	search_attrs = count ?  malloc(sizeof(CK_ATTRIBUTE) * count) : NULL;
+	search_attrs = count ? malloc(sizeof(CK_ATTRIBUTE) * count) : NULL;
 	search_attrs_count = count;
 
 	for (i = 0; i < count; i++) {
