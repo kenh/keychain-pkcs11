@@ -174,7 +174,7 @@ int main(int argc, char *argv[]) {
         printf("Lib version: %d.%d\n", info.libraryVersion.major, info.libraryVersion.minor);
         printf("Lib flags: %d\n", (int) info.flags);
     } else {
-        fprintf(stderr, "Unable to get info (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Unable to get info (rv = %s)\n", getCKRName(rv));
     }
 
 
@@ -227,17 +227,6 @@ int main(int argc, char *argv[]) {
     if (slot == -1)
 	slot = validSlot;
 
-
-
-
-
-
-
-
-
-
-
-
     memset(&sInfo, 0, sizeof(sInfo));
     if (p11p->C_GetSlotInfo) {
 	rv = p11p->C_GetSlotInfo(slot, &sInfo);
@@ -281,12 +270,34 @@ int main(int argc, char *argv[]) {
         printf("Token utcTime = %s\n", stringify(tInfo.utcTime, 16));
 
     } else {
-        fprintf(stderr, "Error getting token info (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Error getting token info (rv = %s)\n", getCKRName(rv));
     }
+
+    if (p11p->C_GetMechanismList)
+	rv = p11p->C_GetMechanismList(slot, NULL, &count);
+    else
+	rv = CKR_FUNCTION_NOT_SUPPORTED;
+
+    if (rv == CKR_OK) {
+	CK_MECHANISM_TYPE_PTR mechList = malloc(sizeof(*mechList) * count);
+	rv = p11p->C_GetMechanismList(slot, mechList, &count);
+
+	if (rv == CKR_OK) {
+	    printf("Token supports %d mechanism%s\n", (int) count,
+		   count > 0 ? "s" : "");
+	    for (i = 0; i < count; i++) {
+		printf("%s\n", getCKMName(mechList[i]));
+	    }
+	}
+	free(mechList);
+    }
+
+    if (rv != CKR_OK)
+	fprintf(stderr, "GetMechanismList failed (rv = %s)\n", getCKRName(rv));
 
     rv = p11p->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, &hSession);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error opening session (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Error opening session (rv = %s)\n", getCKRName(rv));
         goto cleanup;
     }
 
@@ -302,13 +313,13 @@ int main(int argc, char *argv[]) {
         printf("Session flags: %d\n", (int) sessionInfo.flags);
         printf("Session device errors: %d\n", (int) sessionInfo.ulDeviceError);
     } else {
-        fprintf(stderr, "Unable to get session info (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Unable to get session info (rv = %s)\n", getCKRName(rv));
     }
 
 
     rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error logging into token (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Error logging into token (rv = %s)\n", getCKRName(rv));
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
@@ -318,7 +329,7 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsInit(hSession, NULL, 0);
     if (rv != CKR_OK) {
-        fprintf(stderr, "Error initializing Find Objects (rv = %X)\n", (unsigned int) rv);
+        fprintf(stderr, "Error initializing Find Objects (rv = %s)\n", getCKRName(rv));
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
@@ -330,8 +341,8 @@ int main(int argc, char *argv[]) {
     do {
 	rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
 	    if (rv != CKR_OK) {
-		fprintf(stderr, "Error Finding Objects (rv = %X)\n",
-			(unsigned int) rv);
+		fprintf(stderr, "Error Finding Objects (rv = %s)\n",
+			getCKRName(rv));
 		(void)p11p->C_CloseSession(hSession);
 		goto cleanup;
 	    }

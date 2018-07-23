@@ -590,7 +590,7 @@ const char * getCKRName(CK_RV rv) {
         case CKR_NSS_KEYDB_FAILED: return "CKR_NSS_KEYDB_FAILED";
 
         default:
-            return "";
+            return "Unknown error code";
     }
 }
 
