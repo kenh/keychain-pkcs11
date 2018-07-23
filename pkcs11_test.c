@@ -33,6 +33,12 @@ static CK_RV dump_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
 		  CK_OBJECT_HANDLE, CK_ULONG *, ...);
 
 /*
+ * Dump mechanism flags
+ */
+
+static void mechflags_dump(CK_FLAGS);
+
+/*
  * Our routines to output attribute information
  */
 
@@ -286,7 +292,22 @@ int main(int argc, char *argv[]) {
 	    printf("Token supports %d mechanism%s\n", (int) count,
 		   count > 0 ? "s" : "");
 	    for (i = 0; i < count; i++) {
+	    	CK_MECHANISM_INFO mechInfo;
 		printf("%s\n", getCKMName(mechList[i]));
+		if (p11p->C_GetMechanismInfo)
+		    rv = p11p->C_GetMechanismInfo(slot, mechList[i], &mechInfo);
+		else
+		    rv = CKR_FUNCTION_NOT_SUPPORTED;
+		if (rv != CKR_OK) {
+		    fprintf(stderr, "C_GetMechanismInfo failed (rv = %s)\n",
+			    getCKRName(rv));
+		    break;
+		}
+		printf("Min key size = %lu, max key size = %lu\n",
+		       mechInfo.ulMinKeySize, mechInfo.ulMaxKeySize);
+		printf("Flags: ");
+		mechflags_dump(mechInfo.flags);
+		printf("\n");
 	    }
 	}
 	free(mechList);
@@ -832,5 +853,44 @@ keytype_dump(unsigned char *data, unsigned int len)
 	break;
     default:
 	printf("Unknown key type: %#lx", *keytype);
+    }
+}
+
+/*
+ * Dump a seris of mechanism flags
+ */
+
+#define FV(name) { #name, name }
+static struct {
+    const char *name;
+    CK_FLAGS value;
+} mechflags[] = {
+    FV(CKF_HW),
+    FV(CKF_ENCRYPT),
+    FV(CKF_DECRYPT),
+    FV(CKF_DIGEST),
+    FV(CKF_SIGN),
+    FV(CKF_SIGN_RECOVER),
+    FV(CKF_VERIFY),
+    FV(CKF_VERIFY_RECOVER),
+    FV(CKF_GENERATE),
+    FV(CKF_GENERATE_KEY_PAIR),
+    FV(CKF_WRAP),
+    FV(CKF_UNWRAP),
+    FV(CKF_DERIVE),
+    FV(CKF_EXTENSION),
+    { NULL, 0 }
+};
+static void
+mechflags_dump(CK_FLAGS flags)
+{
+    int i;
+    bool hit = false;
+
+    for (i = 0; mechflags[i].name != NULL; i++) {
+	if (flags & mechflags[i].value) {
+	    printf("%s%s", hit ? "|" : "", mechflags[i].name);
+	    hit = true;
+	}
     }
 }
