@@ -17,6 +17,8 @@ keychain_pkcs11_la_SOURCES = \
 			keychain_pkcs11.c \
 			debug.c \
 			debug.h \
+			tables.c \
+			tables.h \
 			mypkcs11.h \
 			pkcs11.h \
 			pkcs11f.h \

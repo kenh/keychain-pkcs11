@@ -14,6 +14,7 @@
 
 #include "mypkcs11.h"
 #include "debug.h"
+#include "tables.h"
 #include "config.h"
 
 /* We currently support 2.40 of Cryptoki */
@@ -70,6 +71,7 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 struct obj_info {
 	unsigned int		id_index;
 	unsigned char		id_value[sizeof(CK_ULONG)];
+	CK_OBJECT_CLASS		class;
 	CK_ATTRIBUTE_PTR	attrs;
 	unsigned int		attr_count;
 	unsigned int		attr_size;
@@ -505,7 +507,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	 */
 	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
 			    CKF_USER_PIN_INITIALIZED |
-			    CKF_PROTECTED_AUTHENTICATION_PATH |
+			    /* CKF_PROTECTED_AUTHENTICATION_PATH | */
 			    CKF_TOKEN_INITIALIZED;
 	token_info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
 	token_info->ulSessionCount = CK_EFFECTIVELY_INFINITE;
@@ -561,7 +563,15 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	return CKR_OK;
 }
 
-NOTSUPPORTED(C_CloseSession, (CK_SESSION_HANDLE session))
+CK_RV C_CloseSession(CK_SESSION_HANDLE session)
+{
+	FUNCINITCHK(C_CloseSession);
+
+	os_log_debug(logsys, "session = %d", (int) session);
+
+	return CKR_OK;
+}
+
 NOTSUPPORTED(C_CloseAllSessions, (CK_SLOT_ID slot_id))
 
 CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
@@ -781,8 +791,90 @@ NOTSUPPORTED(C_Digest, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG 
 NOTSUPPORTED(C_DigestUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
 NOTSUPPORTED(C_DigestKey, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_DigestFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR digest, CK_ULONG_PTR digestlen))
-NOTSUPPORTED(C_SignInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
-NOTSUPPORTED(C_Sign, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
+
+/*
+ * Start a signature operation
+ */
+
+/* XXX Fix when we implement sessions */
+
+static SecKeyAlgorithm sig_alg;
+static CK_OBJECT_HANDLE sig_obj;
+
+CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
+		 CK_OBJECT_HANDLE object)
+{
+	int i;
+
+	FUNCINITCHK(C_SignInit);
+
+	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
+		    (int) session, getCKMName(mech->mechanism), (int) object);
+
+	if (object > obj_list_count - 1)
+		return CKR_KEY_HANDLE_INVALID;
+
+	if (! id_list[obj_list[object].id_index].privcansign)
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	/*
+	 * Map our mechanism onto what we need for signing
+	 */
+
+	for (i = 0; i < keychain_mechmap_size; i++) {
+		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
+			sig_obj = object;
+			sig_alg = *keychain_mechmap[i].sec_signmech;
+			return CKR_OK;
+		}
+	}
+
+	return CKR_MECHANISM_INVALID;
+}
+
+/*
+ * Actually sign the data
+ */
+CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
+	     CK_BYTE_PTR sig, CK_ULONG_PTR siglen)
+{
+	CFDataRef inref, outref;
+	CFErrorRef err;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_SignInit);
+
+	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d"
+		     "outdata = %p, outlen = %d", (int) session, indata,
+		     (int) indatalen, sig, (int) siglen);
+
+	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
+					    kCFAllocatorNull);
+
+	outref = SecKeyCreateSignature(id_list[obj_list[sig_obj].id_index].privkey,
+				       sig_alg, inref, &err);
+
+	CFRelease(inref);
+
+	if (! outref) {
+		os_log_debug(logsys, "SecKeyCreateSignature failed: %@", err);
+		CFRelease(err);
+		return CKR_GENERAL_ERROR;
+	}
+
+	if (*siglen < CFDataGetLength(outref)) {
+		rv = CKR_BUFFER_TOO_SMALL;
+	} else {
+		memcpy(sig, CFDataGetBytePtr(outref), CFDataGetLength(outref));
+	}
+
+	*siglen = CFDataGetLength(outref);
+
+	CFRelease(outref);
+
+	return rv;
+}
+
 NOTSUPPORTED(C_SignUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
 NOTSUPPORTED(C_SignFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
 NOTSUPPORTED(C_SignRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
@@ -1385,6 +1477,7 @@ do { \
 
 		t = i;
 		cl = CKO_CERTIFICATE;
+		obj_list[obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
@@ -1409,6 +1502,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PUBLIC_KEY;
+		obj_list[obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
@@ -1421,6 +1515,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PRIVATE_KEY;
+		obj_list[obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
