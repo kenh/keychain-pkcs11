@@ -82,6 +82,10 @@ static unsigned int obj_list_count = 0;
 static unsigned int obj_list_size = 0;
 static unsigned int obj_search_index = 0;
 
+#define LOG_DEBUG_OBJECT(obj) \
+	os_log_debug(logsys, "Object %lu (%s)", obj, \
+		     getCKOName(obj_list[obj].class));
+
 static void build_objects(void);
 static void free_objects(void);
 
@@ -658,6 +662,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 	if (object >= obj_list_count)
 		return CKR_OBJECT_HANDLE_INVALID;
 
+	LOG_DEBUG_OBJECT(object);
+
 	for (i = 0; i < count; i++) {
 		os_log_debug(logsys, "Retrieving attribute: %s",
 			     getCKAName(template[i].type));
@@ -665,16 +671,28 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 					   template[i].type))) {
 			if (! template[i].pValue) {
 				template[i].ulValueLen = attr->ulValueLen;
+				os_log_debug(logsys, "pValue was NULL, just "
+					     "returning length (%lu)",
+					     attr->ulValueLen);
 			} else {
 				if (template[i].ulValueLen < attr->ulValueLen) {
 					template[i].ulValueLen =
 							attr->ulValueLen;
+					os_log_debug(logsys, "Attribute: "
+						     "buffer too small "
+						     "(%lu, %lu)",
+						     template[i].ulValueLen,
+						     attr->ulValueLen);
 					rv = CKR_BUFFER_TOO_SMALL;
 				} else {
 					memcpy(template[i].pValue, attr->pValue,
 					       attr->ulValueLen);
 					template[i].ulValueLen =
 							attr->ulValueLen;
+					os_log_debug(logsys, "Copied over "
+						     "attribute (%lu, %lu)",
+						     template[i].ulValueLen,
+						     attr->ulValueLen);
 				}
 			}
 		} else {
@@ -683,6 +701,9 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 			rv = CKR_ATTRIBUTE_TYPE_INVALID;
 		}
 	}
+
+	os_log_debug(logsys, "C_GetAttributeValue: returning %s",
+		     getCKRName(rv));
 
 	return rv;
 }
@@ -751,6 +772,7 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 			object[rc++] = obj_search_index;
 			if (rc >= maxcount) {
 				*count = rc;
+				obj_search_index++;
 				return CKR_OK;
 			}
 		}
@@ -842,11 +864,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	CFErrorRef err;
 	CK_RV rv = CKR_OK;
 
-	FUNCINITCHK(C_SignInit);
+	FUNCINITCHK(C_Sign);
 
-	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d"
+	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
 		     "outdata = %p, outlen = %d", (int) session, indata,
-		     (int) indatalen, sig, (int) siglen);
+		     (int) indatalen, sig, (int) *siglen);
 
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
@@ -857,7 +879,8 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	CFRelease(inref);
 
 	if (! outref) {
-		os_log_debug(logsys, "SecKeyCreateSignature failed: %@", err);
+		os_log_debug(logsys, "SecKeyCreateSignature failed: "
+			     "%{public}@", err);
 		CFRelease(err);
 		return CKR_GENERAL_ERROR;
 	}
