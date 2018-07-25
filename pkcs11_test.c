@@ -144,6 +144,7 @@ int main(int argc, char *argv[]) {
 	    signsize = atoi(optarg);
 	    signbuf = malloc(signsize);
 	    memset(signbuf, 0, signsize);
+	    break;
 	case 'n':
 #ifdef HAVE_SETPROGNAME
 	    setprogname(optarg);
