@@ -133,13 +133,17 @@ int main(int argc, char *argv[]) {
     CK_OBJECT_HANDLE sObject = -1;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
 
-    char *signstring = NULL;
-
+    unsigned char *signbuf = NULL;
+    unsigned int signsize = 0;
 
     int i;
 
-    while ((i = getopt(argc, argv, "n:o:S:s:")) != -1) {
+    while ((i = getopt(argc, argv, "N:n:o:S:s:")) != -1) {
 	switch (i) {
+	case 'N':
+	    signsize = atoi(optarg);
+	    signbuf = malloc(signsize);
+	    memset(signbuf, 0, signsize);
 	case 'n':
 #ifdef HAVE_SETPROGNAME
 	    setprogname(optarg);
@@ -149,7 +153,8 @@ int main(int argc, char *argv[]) {
 	    slot = atoi(optarg);
 	    break;
 	case 'S':
-	    signstring = optarg;
+	    signbuf = (unsigned char *) optarg;
+	    signsize = strlen(optarg);
 	    break;
 	case 'o':
 	    sObject = atoi(optarg);
@@ -157,8 +162,8 @@ int main(int argc, char *argv[]) {
 	case '?':
 	default:
 	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
-		    "[-S string-to-sign] [-o object] [pkcs11_library]\n",
-		    argv[0]);
+		    "[-N bufsize] [-S string-to-sign] [-o object] "
+		    "[pkcs11_library]\n", argv[0]);
 	    exit(1);
 	}
     }
@@ -568,7 +573,7 @@ int main(int argc, char *argv[]) {
 
     rv = p11p->C_FindObjectsFinal(hSession);
 
-    if (signstring) {
+    if (signbuf) {
 	unsigned char data[1024];
 	CK_ULONG datalen = sizeof(data);
 	CK_MECHANISM mech = { sMech, NULL, 0 };
@@ -581,8 +586,7 @@ int main(int argc, char *argv[]) {
 	    exit(1);
 	}
 
-	rv = p11p->C_Sign(hSession, (unsigned char *) signstring,
-			  strlen(signstring), data, &datalen);
+	rv = p11p->C_Sign(hSession, signbuf, signsize, data, &datalen);
 
 	if (rv != CKR_OK) {
 	    fprintf(stderr, "C_Sign failed (rv =  %s)\n", getCKRName(rv));
