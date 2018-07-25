@@ -598,6 +598,85 @@ int main(int argc, char *argv[]) {
 	for (i = 0; i < datalen; i++)
 	    printf("%02x", data[i]);
 	printf("\n");
+
+	/*
+	 * Find the public key corresponding to this keyid, and try
+	 * to verify it.
+	 */
+
+	if (p11p->C_VerifyInit) {
+	    CK_ULONG vnum;
+	    CK_OBJECT_HANDLE vObject;
+
+	    attrs[0].type = CKA_ID;
+	    attrs[0].pValue = NULL;
+	    attrs[0].ulValueLen = 0;
+
+	    rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
+
+	    if (rv != CKR_OK && rv != CKR_BUFFER_TOO_SMALL) {
+		fprintf(stderr, "1st call to C_GettributeValue failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    attrs[0].pValue = malloc(attrs[0].ulValueLen);
+
+	    rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "2nd call to C_GettributeValue failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    cls = CKO_PUBLIC_KEY;
+	    attrs[1].type = CKA_CLASS;
+	    attrs[1].pValue = &cls;
+	    attrs[1].ulValueLen = sizeof cls;
+	    rv = p11p->C_FindObjectsInit(hSession, attrs, 2);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "Call to C_FindObjectsInit failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    rv = p11p->C_FindObjects(hSession, &vObject, 1, &vnum);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "Call to C_FindObjects failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    if (vnum != 1) {
+		fprintf(stderr, "No verify objects found\n");
+		exit(1);
+	    }
+
+	    p11p->C_FindObjectsFinal(hSession);
+
+	    free(attrs[0].pValue);
+
+	    rv = p11p->C_VerifyInit(hSession, &mech, vObject);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "Call to C_VerifyInit failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    rv = p11p->C_Verify(hSession, signbuf, signsize, data, datalen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "Call to C_VerifyFailed failed (%s)\n",
+			getCKRName(rv));
+		exit(1);
+	    } else {
+		printf("signature was good!\n");
+	    }
+	}
     }
 
 #if 0
