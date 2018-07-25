@@ -902,8 +902,69 @@ NOTSUPPORTED(C_SignUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_UL
 NOTSUPPORTED(C_SignFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
 NOTSUPPORTED(C_SignRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_SignRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
-NOTSUPPORTED(C_VerifyInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
-NOTSUPPORTED(C_Verify, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG siglen))
+
+CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
+		   CK_OBJECT_HANDLE key)
+{
+	int i;
+
+	FUNCINITCHK(C_VerifyInit);
+
+	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
+		    (int) session, getCKMName(mech->mechanism), (int) key);
+
+	if (key > obj_list_count - 1)
+		return CKR_KEY_HANDLE_INVALID;
+
+	if (! id_list[obj_list[key].id_index].pubcanverify)
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	/*
+	 * Map our mechanism onto what we need for verification
+	 */
+
+	for (i = 0; i < keychain_mechmap_size; i++) {
+		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
+			sig_obj = key;
+			sig_alg = *keychain_mechmap[i].sec_signmech;
+			return CKR_OK;
+		}
+	}
+
+	return CKR_MECHANISM_INVALID;
+}
+
+CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
+	       CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG siglen)
+{
+	CFDataRef inref, sigref;
+	CFErrorRef err;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_Verify);
+
+	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
+		     "outdata = %p, outlen = %d", (int) session, indata,
+		     (int) indatalen, sig, (int) siglen);
+
+	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
+					    kCFAllocatorNull);
+	sigref = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
+					     kCFAllocatorNull);
+
+	if (!SecKeyVerifySignature(id_list[obj_list[sig_obj].id_index].pubkey,
+				       sig_alg, inref, sigref, &err)) {
+		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
+		CFRelease(err);
+		rv = CKR_SIGNATURE_INVALID;
+	}
+
+	CFRelease(inref);
+	CFRelease(sigref);
+
+	return rv;
+}
+
 NOTSUPPORTED(C_VerifyUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
 NOTSUPPORTED(C_VerifyFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG siglen))
 NOTSUPPORTED(C_VerifyRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
