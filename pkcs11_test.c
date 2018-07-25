@@ -24,6 +24,9 @@
 #include "config.h"
 
 #include <stdarg.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 
 /*
  * Dump one or more attributes of an object
@@ -103,6 +106,12 @@ static struct attr_handler value_attr = {
 };
 #endif
 
+/*
+ * Read data into a buffer, reallocating it along the way
+ */
+
+static void getdata(const char *, unsigned char **, size_t *);
+
 int main(int argc, char *argv[]) {
     CK_RV rv;
     CK_FUNCTION_LIST_PTR p11p;
@@ -132,13 +141,16 @@ int main(int argc, char *argv[]) {
     CK_SLOT_INFO slotInfo;
     CK_OBJECT_HANDLE sObject = -1;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
+    CK_MECHANISM mech = { sMech, NULL, 0 };
+    const char *verify_data = NULL;
+    const char *verify_sig = NULL;
 
     unsigned char *signbuf = NULL;
     unsigned int signsize = 0;
 
     int i;
 
-    while ((i = getopt(argc, argv, "N:n:o:S:s:")) != -1) {
+    while ((i = getopt(argc, argv, "N:n:o:S:s:v:V:")) != -1) {
 	switch (i) {
 	case 'N':
 	    signsize = atoi(optarg);
@@ -160,13 +172,24 @@ int main(int argc, char *argv[]) {
 	case 'o':
 	    sObject = atoi(optarg);
 	    break;
+	case 'v':
+	    verify_data = optarg;
+	    break;
+	case 'V':
+	    verify_sig = optarg;
+	    break;
 	case '?':
 	default:
 	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
 		    "[-N bufsize] [-S string-to-sign] [-o object] "
-		    "[pkcs11_library]\n", argv[0]);
+		    "[-v data-file] [-V sig-file] [pkcs11_library]\n", argv[0]);
 	    exit(1);
 	}
+    }
+
+    if ((verify_data || verify_sig) && (!verify_data || !verify_sig)) {
+	fprintf(stderr, "Both -v and -V must be given\n");
+	exit(1);
     }
 
     argc -= optind - 1;
@@ -577,7 +600,6 @@ int main(int argc, char *argv[]) {
     if (signbuf) {
 	unsigned char data[1024];
 	CK_ULONG datalen = sizeof(data);
-	CK_MECHANISM mech = { sMech, NULL, 0 };
 
 	rv = p11p->C_SignInit(hSession, &mech, sObject);
 
@@ -676,6 +698,32 @@ int main(int argc, char *argv[]) {
 	    } else {
 		printf("signature was good!\n");
 	    }
+	}
+    }
+
+    if (verify_data) {
+	unsigned char *d, *sig;
+	size_t dlen, siglen;
+
+	getdata(verify_data, &d, &dlen);
+	getdata(verify_sig, &sig, &siglen);
+
+	rv = p11p->C_VerifyInit(hSession, &mech, sObject);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "C_VerifyInit failed (rv = %s)\n", getCKRName(rv));
+	    exit(1);
+	}
+
+	rv = p11p->C_Verify(hSession, d, dlen, sig, siglen);
+	free(d);
+	free(sig);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "C_Verify failed (rv = %s)\n", getCKRName(rv));
+	    exit(1);
+	} else {
+	    printf("Good signature on %s/%s\n", verify_data, verify_sig);
 	}
     }
 
@@ -1064,6 +1112,7 @@ static struct {
     FV(CKF_EXTENSION),
     { NULL, 0 }
 };
+
 static void
 mechflags_dump(CK_FLAGS flags)
 {
@@ -1076,4 +1125,41 @@ mechflags_dump(CK_FLAGS flags)
 	    hit = true;
 	}
     }
+}
+
+/*
+ * Returns allocated data that needs to be free()d, exits on error.
+ */
+
+#define RSIZE 8192
+
+static void
+getdata(const char *filename, unsigned char **buf, size_t *size)
+{
+	int fd, cc;
+	*size = 0;
+	*buf = NULL;
+
+	if ((fd = open(filename, O_RDONLY)) < 0) {
+		fprintf(stderr, "Unable to open \"%s\": %s\n", filename,
+			strerror(errno));
+		exit(1);
+	}
+
+	do {
+		*buf = realloc(*buf, *size + RSIZE);
+		cc = read(fd, *buf + *size, RSIZE);
+
+		if (cc < 0) {
+			fprintf(stderr, "Read on \"%s\" failed: %s\n", filename,
+				strerror(errno));
+			exit(1);
+		}
+
+		*size += cc;
+	} while (cc > 0);
+
+	close(fd);
+
+	return;
 }
