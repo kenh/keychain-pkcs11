@@ -493,8 +493,36 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	if (! token_info)
 		return CKR_ARGUMENTS_BAD;
 
-	sprintfpad(token_info->label, sizeof(token_info->label), "%s",
-		   "Keychain PKCS#11 Virtual Token");
+	/*
+	 * Since this is used as label in a number of places to display
+	 * to the user, make it something useful.  Pick the first certificate
+	 * we found (if available) and return the subject summary as
+	 * the token label.
+	 */
+
+	if (id_list_count > 0) {
+		CFStringRef summary;
+		char *label;
+
+		summary = SecCertificateCopySubjectSummary(id_list[0].cert);
+
+		if (summary) {
+			label = getstrcopy(summary);
+		} else {
+			label = strdup("Unknown Keychain Token");
+		}
+
+		sprintfpad(token_info->label, sizeof(token_info->label),
+			   "%s", label);
+
+		free(label);
+		if (summary)
+			CFRelease(summary);
+	} else {
+		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
+			   "Keychain PKCS#11 Virtual Token");
+	}
+
 	sprintfpad(token_info->manufacturerID,
 		   sizeof(token_info->manufacturerID), "%s",
 		   "Unknown Manufacturer");
@@ -863,12 +891,29 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	CFDataRef inref, outref;
 	CFErrorRef err;
 	CK_RV rv = CKR_OK;
+#ifdef KEYCHAIN_DEBUG
+	char *file;
+#endif /* KEYCHAIN_DEBUG */
 
 	FUNCINITCHK(C_Sign);
 
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
 		     "outdata = %p, outlen = %d", (int) session, indata,
 		     (int) indatalen, sig, (int) *siglen);
+
+#ifdef KEYCHAIN_DEBUG
+	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_DATAFILE"))) {
+		FILE *f = fopen(file, "w");
+
+		if (! f) {
+			os_log_debug(logsys, "Failed to open \"%s\": "
+				     "%{darwin.errno}d", file, errno);
+		} else {
+			fwrite(indata, indatalen, 1, f);
+			fclose(f);
+		}
+	}
+#endif /* KEYCHAIN_DEBUG */
 
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
@@ -895,6 +940,19 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 
 	CFRelease(outref);
 
+#if KEYCHAIN_DEBUG
+	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_SIGFILE"))) {
+		FILE *f = fopen(file, "w");
+
+		if (! f) {
+			os_log_debug(logsys, "Failed to open \"%s\": "
+				     "%{darwin.errno}d", file, errno);
+		} else {
+			fwrite(sig, *siglen, 1, f);
+			fclose(f);
+		}
+	}
+#endif /* KEYCHAIN_DEBUG */
 	return rv;
 }
 
@@ -1054,7 +1112,7 @@ scan_identities(void)
 		kSecReturnRef,
 		kSecReturnAttributes,
 	};
-	const void * values[] = {
+	const void *values[] = {
 		kSecClassIdentity,		/* kSecClass */
 		kSecMatchLimitAll,		/* kSecMatchLimit */
 		kSecAttrAccessGroupToken,	/* kSecAttrAccessGroup */
@@ -1399,6 +1457,7 @@ logtype(const char *string, CFTypeRef ref)
 	CFRelease(str);
 }
 
+#if defined(KEYCHAIN_DEBUG)
 /*
  * Dump the contents of a dictionary
  */
@@ -1427,6 +1486,7 @@ dumpdict(const char *string, CFDictionaryRef dict)
 	free(keys);
 	free(values);
 }
+#endif /* KEYCHAIN_DEBUG */
 
 /*
  * Convert Security framework key types to PKCS#11 key types.
@@ -1521,6 +1581,9 @@ do { \
 	} \
 } while (0)
 
+/*
+ * Build up a list of objects valid for this session.
+ */
 
 static void
 build_objects(void)
