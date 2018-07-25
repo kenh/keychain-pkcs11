@@ -1605,8 +1605,7 @@ search_object(struct obj_info *obj, CK_ATTRIBUTE_PTR attrs,
 				     attrs[i].pValue == NULL) &&
 				    (obj->attrs[j].pValue != attrs[i].pValue))
 					return false;
-				else
-					goto next;
+
 				/*
 				 * Both are valid pointers and have the same
 				 * length, so do a memcmp().  But again, if
