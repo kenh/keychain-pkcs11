@@ -241,6 +241,10 @@ static CK_FUNCTION_LIST function_list = {
 };
 #undef CK_PKCS11_FUNCTION_INFO
 
+/*
+ * Some convenience functions we use for things we have to continually do
+ */
+
 #define FUNCINIT(func) \
 do { \
 	pthread_once(&loginit, log_init); \
@@ -263,6 +267,12 @@ CK_RV name args { \
 	return CKR_FUNCTION_NOT_SUPPORTED; \
 }
 
+#define RET(name, val) \
+do { \
+	os_log_debug(logsys, #name " returning %s", getCKRName(val)); \
+	return val; \
+} while (0)
+
 static int initialized = 0;
 
 /*
@@ -275,15 +285,12 @@ CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR pPtr)
 	FUNCINIT(C_GetFunctionList);
 
 	if (! pPtr) {
-		os_log_debug(logsys, "C_GetFunctionList called (bad arguments)");
-		return CKR_ARGUMENTS_BAD;
+		RET(C_GetFunctionList, CKR_ARGUMENTS_BAD);
 	}
 
 	*pPtr = &function_list;
 
-	os_log_debug(logsys, "C_GetFunctionList called (successful)");
-
-	return CKR_OK;
+	RET(C_GetFunctionList, CKR_OK);
 }
 
 /*
@@ -297,14 +304,13 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 	FUNCINIT(C_Initialize);
 
 	if (initialized) {
-		os_log_debug(logsys, "Library is already initialized!");
-		return CKR_CRYPTOKI_ALREADY_INITIALIZED;
+		RET(C_Initialized, CKR_CRYPTOKI_ALREADY_INITIALIZED);
 	}
 
 	if (init) {
 		if (init->pReserved) {
 			os_log_debug(logsys, "pReserved set, returning");
-			return CKR_ARGUMENTS_BAD;
+			RET(C_Initialized, CKR_ARGUMENTS_BAD);
 		}
 		if (init->flags & CKF_OS_LOCKING_OK) {
 			use_mutex = 1;
@@ -331,7 +337,7 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 
 	initialized = 1;
 
-	return CKR_OK;
+	RET(C_Initalize, CKR_OK);
 }
 
 CK_RV C_Finalize(CK_VOID_PTR p)
@@ -340,7 +346,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	if (p) {
 		os_log_debug(logsys, "pReserved is non-NULL");
-		return CKR_ARGUMENTS_BAD;
+		RET(C_Finalize, CKR_ARGUMENTS_BAD);
 	}
 
 	DESTROY_MUTEX(id_mutex);
@@ -348,7 +354,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	use_mutex = 0;
 	initialized = 0;
 
-	return CKR_OK;
+	RET(C_Finalize, CKR_OK);
 }
 
 CK_RV C_GetInfo(CK_INFO_PTR p)
@@ -357,7 +363,7 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 
 	if (p->flags != 0) {
 		os_log_debug(logsys, "flags is nonzero!");
-		return CKR_ARGUMENTS_BAD;
+		RET(C_GetInfo, CKR_ARGUMENTS_BAD);
 	}
 
 	p->cryptokiVersion.major = CK_MAJOR_VERSION;
@@ -372,7 +378,7 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 	p->libraryVersion.major = 1;
 	p->libraryVersion.minor = 0;
 
-	return CKR_OK;
+	RET(C_GetInfo, CKR_OK);
 }
 
 /* C_GetFunctionList declared above */
@@ -434,7 +440,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 out:
 	UNLOCK_MUTEX(id_mutex);
-	return rv;
+	RET(C_GetSlotList, rv);
 }
 
 /*
@@ -451,7 +457,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	CHECKSLOT(slot_id);
 
 	if (! slot_info)
-		return CKR_ARGUMENTS_BAD;
+		RET(C_GetSlotInfo, CKR_ARGUMENTS_BAD);
 
 	/*
 	 * We can't really get any useful information out of the Security
@@ -479,7 +485,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	slot_info->firmwareVersion.major = 1;
 	slot_info->firmwareVersion.minor = 0;
 
-	return CKR_OK;
+	RET(C_GetSlotInfo, CKR_OK);
 }
 
 /*
@@ -497,7 +503,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	CHECKSLOT(slot_id);
 
 	if (! token_info)
-		return CKR_ARGUMENTS_BAD;
+	RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
 
 	/*
 	 * Since this is used as label in a number of places to display
@@ -564,7 +570,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	sprintfpad(token_info->utcTime, sizeof(token_info->utcTime),
 		   "%s", "1970010100000000");
 
-	return CKR_OK;
+	RET(C_GetTokenInfo, CKR_OK);
 }
 
 /*
@@ -595,7 +601,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 
 	if (!mechlist) {
 		*mechnum = keychain_mechmap_size;
-		return CKR_OK;
+		RET(C_GetMechanismList, CKR_OK);
 	}
 
 	/*
@@ -604,13 +610,13 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 
 	if (*mechnum < keychain_mechmap_size) {
 		*mechnum = keychain_mechmap_size;
-		return CKR_BUFFER_TOO_SMALL;
+		RET(C_GetMechanismList, CKR_BUFFER_TOO_SMALL);
 	}
 
 	for (i = 0; i < keychain_mechmap_size; i++)
 		mechlist[i] = keychain_mechmap[i].cki_mech;
 
-	return CKR_OK;
+	RET(C_GetMechanismList, CKR_OK);
 }
 
 CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
@@ -630,11 +636,11 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
 			mechinfo->ulMinKeySize = keychain_mechmap[i].min_keylen;
 			mechinfo->ulMaxKeySize = keychain_mechmap[i].max_keylen;
 			mechinfo->flags = keychain_mechmap[i].usage_flags;
-			return CKR_OK;
+			RET(C_GetMechanismInfo, CKR_OK);
 		}
 	}
 
-	return CKR_MECHANISM_INVALID;
+	RET(C_GetMechanismInfo, CKR_MECHANISM_INVALID);
 }
 
 NOTSUPPORTED(C_InitToken, (CK_SLOT_ID slot_id, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen, CK_UTF8CHAR_PTR label))
@@ -658,14 +664,14 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	CHECKSLOT(slot_id);
 
 	if (! (flags & CKF_SERIAL_SESSION))
-		return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
+		RET(C_OpenSession, CKR_SESSION_PARALLEL_NOT_SUPPORTED);
 
 	if (flags & CKF_RW_SESSION)
-		return CKR_TOKEN_WRITE_PROTECTED;
+		RET(C_OpenSession, CKR_TOKEN_WRITE_PROTECTED);
 
 	*session = SESSION_HANDLE;
 
-	return CKR_OK;
+	RET(C_OpenSession, CKR_OK);
 }
 
 CK_RV C_CloseSession(CK_SESSION_HANDLE session)
