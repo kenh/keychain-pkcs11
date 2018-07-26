@@ -24,6 +24,17 @@
 
 /* Our slot number we use */
 #define KEYCHAIN_SLOT	1
+
+/* Return CKR_SLOT_ID_INVALID if we are given anything except KEYCHAIN_SLOT */
+#define CHECKSLOT(slot) \
+do { \
+	if (slot != KEYCHAIN_SLOT || !have_slot) { \
+		os_log_debug(logsys, "Slot %lu is invalid, returning " \
+			     "CKR_SLOT_ID_INVALID", slot); \
+		return CKR_SLOT_ID_INVALID; \
+	} \
+} while (0)
+
 /* For now */
 #define SESSION_HANDLE	1
 
@@ -48,6 +59,7 @@ static struct id_info *id_list = NULL;
 static unsigned int id_list_count = 0;		/* Number of valid entries */
 static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
 static bool id_list_init = false;
+static bool have_slot = false;			/* True if we have a slot */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
@@ -410,12 +422,14 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 				slot_list[0] = KEYCHAIN_SLOT;/* Our only slot */
 		}
 		*slot_num = 1;
+		have_slot = true;
 	} else {
 		/*
 		 * If we're here, token_present is TRUE and we have no
 		 * identities, so return zero slots
 		 */
 		*slot_num = 0;
+		have_slot = false;
 	}
 
 out:
@@ -434,12 +448,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	os_log_debug(logsys, "slot_id = %d, slot_info = %p", (int) slot_id,
 		     slot_info);
 
-	/*
-	 * Right now, we only have a single slot
-	 */
-
-	if (slot_id != KEYCHAIN_SLOT)
-		return CKR_SLOT_ID_INVALID;
+	CHECKSLOT(slot_id);
 
 	if (! slot_info)
 		return CKR_ARGUMENTS_BAD;
@@ -485,12 +494,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
 		     token_info);
 
-	/*
-	 * Right now, we only have a single slot
-	 */
-
-	if (slot_id != KEYCHAIN_SLOT)
-		return CKR_SLOT_ID_INVALID;
+	CHECKSLOT(slot_id);
 
 	if (! token_info)
 		return CKR_ARGUMENTS_BAD;
@@ -563,8 +567,76 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	return CKR_OK;
 }
 
-NOTSUPPORTED(C_GetMechanismList, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist, CK_ULONG_PTR mechnum))
-NOTSUPPORTED(C_GetMechanismInfo, (CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype, CK_MECHANISM_INFO_PTR mechinfo))
+/*
+ * Return our list of mechanisms that we support.
+ */
+
+CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
+			 CK_ULONG_PTR mechnum)
+{
+	int i;
+
+	FUNCINITCHK(C_GetMechanismList);
+
+	os_log_debug(logsys, "slot_id = %lu, mechlist = %p, mechnum = %lu",
+		     slot_id, mechlist, *mechnum);
+
+	CHECKSLOT(slot_id);
+
+	/*
+	 * It's hard to know exactly what all mechanisms are supported by
+	 * a particular token, but we can probably safely return all of the
+	 * RSA ones at least (since those should work with any RSA key)
+	 */
+
+	/*
+	 * Return the list count (and CKR_OK) if mechlist was NULL
+	 */
+
+	if (!mechlist) {
+		*mechnum = keychain_mechmap_size;
+		return CKR_OK;
+	}
+
+	/*
+	 * Return our mechanisms (or CKR_BUFFER_TOO_SMALL)
+	 */
+
+	if (*mechnum < keychain_mechmap_size) {
+		*mechnum = keychain_mechmap_size;
+		return CKR_BUFFER_TOO_SMALL;
+	}
+
+	for (i = 0; i < keychain_mechmap_size; i++)
+		mechlist[i] = keychain_mechmap[i].cki_mech;
+
+	return CKR_OK;
+}
+
+CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
+			 CK_MECHANISM_INFO_PTR mechinfo)
+{
+	int i;
+
+	FUNCINITCHK(C_GetMechanismInfo);
+
+	os_log_debug(logsys, "slot_id = %lu, mechtype = %s, mechinfo = %p",
+		     slot_id, getCKMName(mechtype), mechinfo);
+
+	CHECKSLOT(slot_id);
+
+	for (i = 0; i < keychain_mechmap_size; i++) {
+		if (mechtype == keychain_mechmap[i].cki_mech) {
+			mechinfo->ulMinKeySize = keychain_mechmap[i].min_keylen;
+			mechinfo->ulMaxKeySize = keychain_mechmap[i].max_keylen;
+			mechinfo->flags = keychain_mechmap[i].usage_flags;
+			return CKR_OK;
+		}
+	}
+
+	return CKR_MECHANISM_INVALID;
+}
+
 NOTSUPPORTED(C_InitToken, (CK_SLOT_ID slot_id, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen, CK_UTF8CHAR_PTR label))
 NOTSUPPORTED(C_InitPIN, (CK_SESSION_HANDLE session, CK_UTF8CHAR_PTR pin, CK_ULONG pinlen))
 NOTSUPPORTED(C_SetPIN, (CK_SESSION_HANDLE session, CK_UTF8CHAR_PTR oldpin, CK_ULONG oldpinlen, CK_UTF8CHAR_PTR newpin, CK_ULONG newpinlen))
@@ -583,8 +655,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		     "notify_callback = %p, session_handle = %p", (int) slot_id,
 		     flags, app_callback, notify_callback, session);
 
-	if (slot_id != KEYCHAIN_SLOT)
-		return CKR_SLOT_ID_INVALID;
+	CHECKSLOT(slot_id);
 
 	if (! (flags & CKF_SERIAL_SESSION))
 		return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
