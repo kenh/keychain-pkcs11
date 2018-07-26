@@ -4,6 +4,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <dispatch/dispatch.h>
 #include <os/log.h>
 
 #include <stdio.h>
@@ -41,9 +42,6 @@ do { \
 	} \
 } while (0)
 
-/* For now */
-#define SESSION_HANDLE	1
-
 /*
  * Our list of identities that is stored on our smartcard
  */
@@ -73,6 +71,52 @@ static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
 /*
+ * Our session information.  Anything that modifies a session will need to
+ * lock that particular session.  We keep an array of pointers to sessions
+ * available; if we need more then reallocate the array.
+ *
+ * Note that "sess_mutex" is for locking the overall session array,
+ * but each session also has a mutex.  Sigh.  Is this overkill?  I have
+ * no idea.
+ *
+ * SecKeyAlgorithms are currently constant CFStringRef so we shouldn't
+ * have to worry about maintaing references to it using CFRetain/CFRelease().
+ */
+
+struct session {
+	kc_mutex 	mutex;			/* Session mutex */
+	struct obj_info *obj_list;		/* Objects list */
+	unsigned int	obj_list_count;		/* Object list count */
+	unsigned int	obj_list_size;		/* Size of obj_list */
+	unsigned int	obj_search_index;	/* Current search index */
+	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
+	unsigned int	search_attrs_count;	/* Search attribute count */
+	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
+	CK_OBJECT_HANDLE sig_obj;		/* Key object for signing */
+	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
+	CK_OBJECT_HANDLE ver_obj;		/* Verify object */
+};
+
+static struct session **sess_list = NULL;	/* Yes, array of pointers */
+static unsigned int sess_list_count = 0;
+static unsigned int sess_list_size = 0;
+
+/*
+ * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
+ * for this handle
+ */
+
+#define CHECKSESSION(session, var) \
+do { \
+	if (session > sess_list_count || sess_list[session] == NULL) { \
+		os_log_debug(logsys, "Session handle %lu is invalid, " \
+			     "returning CKR_SESSION_HANDLE_INVALID", session); \
+		return CKR_SESSION_HANDLE_INVALID; \
+	} \
+	var = sess_list[session];
+while (0)
+
+/*
  * Our object list and the functions to handle them
  *
  * The object types we support are:
@@ -96,23 +140,18 @@ struct obj_info {
 };
 
 static struct obj_info *obj_list = NULL;
-static unsigned int obj_list_count = 0;
-static unsigned int obj_list_size = 0;
-static unsigned int obj_search_index = 0;
 
 #define LOG_DEBUG_OBJECT(obj) \
 	os_log_debug(logsys, "Object %lu (%s)", obj, \
 		     getCKOName(obj_list[obj].class));
 
-static void build_objects(void);
+static void build_objects(struct session *);
 static void free_objects(void);
 
 /*
  * Our attribute list used for searching
  */
 
-static CK_ATTRIBUTE_PTR	search_attrs = NULL;
-static unsigned int search_attrs_count = 0;
 static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
 static CK_ATTRIBUTE_PTR find_attribute(struct obj_info *, CK_ATTRIBUTE_TYPE);
 static void dump_attribute(const char *, CK_ATTRIBUTE_PTR);
@@ -195,7 +234,7 @@ do { \
 } while (0)
 
 static kc_mutex id_mutex;
-
+static kc_mutex sess_mutex;
 /*
  * Various other utility functions we need
  */
@@ -217,9 +256,9 @@ static void dumpdict(const char *, CFDictionaryRef);
  * log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
  */
 
-static void log_init(void);
+static void log_init(void *);
 static os_log_t logsys;
-static pthread_once_t loginit = PTHREAD_ONCE_INIT;
+static dispatch_once_t loginit;
 
 /*
  * I guess the API lied; os_log_debug() REALLY can't take a const char *,
@@ -254,7 +293,7 @@ static CK_FUNCTION_LIST function_list = {
 
 #define FUNCINIT(func) \
 do { \
-	pthread_once(&loginit, log_init); \
+	dispatch_once_f(&loginit, NULL, log_init); \
 	os_log_debug(logsys, #func " called"); \
 } while (0)
 
@@ -341,11 +380,16 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 	}
 
 	CREATE_MUTEX(id_mutex);
+	CREATE_MUTEX(sess_mutex);
 
 	initialized = 1;
 
 	RET(C_Initalize, CKR_OK);
 }
+
+/*
+ * Clean up everything from the library
+ */
 
 CK_RV C_Finalize(CK_VOID_PTR p)
 {
@@ -356,10 +400,19 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 		RET(C_Finalize, CKR_ARGUMENTS_BAD);
 	}
 
+	LOCK_MUTEX(id_mutex);
+
+	obj_list_free();
+	id_list_free();
+
+	UNLOCK_MUTEX(id_mutex);
+
 	DESTROY_MUTEX(id_mutex);
+	DESTROY_MUTEX(sess_mutex);
 
 	use_mutex = 0;
 	initialized = 0;
+	have_slot = false;
 
 	RET(C_Finalize, CKR_OK);
 }
@@ -402,13 +455,20 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		     (int) *slot_num);
 
 	/*
-	 * We need to rescan our identity list if slot_list is NULL or
-	 * we haven't been initialized.
+	 * We need to rescan our identity list if we haven't been initialized.
+	 *
+	 * We used to do a rescan if slot_list was NULL, but it got to be
+	 * too hard to allow a rescan and keep references to identities
+	 * if we had open sessions.  So for now the only way to rescan the
+	 * slot list (and check for different identities) is to call
+	 * C_Initialize() again (which means calling C_Finalize()) which
+	 * will reset all of the identity information.  My reading of
+	 * PKCS#11 says that's ok.
 	 */
 
 	LOCK_MUTEX(id_mutex);
 
-	if (! id_list_init || !slot_list) {
+	if (! id_list_init) {
 		if (scan_identities()) {
 			rv = CKR_FUNCTION_FAILED;
 			goto out;
@@ -484,8 +544,10 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 	slot_info->flags = CKF_HW_SLOT;
 
+	LOCK_MUTEX(id_mutex);
 	if (id_list_count > 0)
 		slot_info->flags |= CKF_TOKEN_PRESENT;
+	UNLOCK_MUTEX(id_mutex);
 
 	slot_info->hardwareVersion.major = 1;
 	slot_info->hardwareVersion.minor = 0;
@@ -521,6 +583,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	 * the token label.
 	 */
 
+	LOCK_MUTEX(id_mutex);
+
 	if (id_list_count > 0) {
 		CFStringRef summary;
 		char *label;
@@ -544,6 +608,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 			   "Keychain PKCS#11 Virtual Token");
 	}
 
+	UNLOCK_MUTEX(id_mutex);
+
 	sprintfpad(token_info->manufacturerID,
 		   sizeof(token_info->manufacturerID), "%s",
 		   "Unknown Manufacturer");
@@ -559,11 +625,12 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
 			    CKF_USER_PIN_INITIALIZED |
 			    CKF_TOKEN_INITIALIZED;
-			    /* CKF_PROTECTED_AUTHENTICATION_PATH | */
 	/*
-	 * Right now we set CKF_PROTECTED_AUTHENTICATION_PATH
-	 * which means we will count on the Security framework on popping
-	 * up a user dialog to ask for the PIN; we might change that later.
+	 * Some programs don't work so well if we set
+	 * CKF_PROTECTED_AUTHENTICATION_PATH, so let's make it so it's
+	 * controllable.  If we find the program name (as returned by
+	 * getprogname() in the special "askPIN" key in our preference
+	 * domain, then don't set it; otherwise, DO set it.
 	 */
 
 	progname = getprogname();
@@ -645,6 +712,13 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 	RET(C_GetMechanismList, CKR_OK);
 }
 
+/*
+ * Return information on a particular mechanism.
+ *
+ * It's not clear how important this information is, at least for
+ * callers of our library.  Return some stuff that seems reasonable.
+ */
+
 CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
 			 CK_MECHANISM_INFO_PTR mechinfo)
 {
@@ -681,6 +755,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		    CK_VOID_PTR app_callback, CK_NOTIFY notify_callback,
 		    CK_SESSION_HANDLE_PTR session)
 {
+	struct session *sess;
+
 	FUNCINITCHK(C_OpenSession);
 
 	os_log_debug(logsys, "slot_id = %d, flags = %#lx, app_callback = %p, "
@@ -695,18 +771,63 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	if (flags & CKF_RW_SESSION)
 		RET(C_OpenSession, CKR_TOKEN_WRITE_PROTECTED);
 
-	*session = SESSION_HANDLE;
+	sess = malloc(sizeof(*sess));
+	CREATE_MUTEX(sess->mutex);
+	sess->obj_list = NULL;
+	sess->obj_list_count = 0;
+	sess->obj_list_size = 0;
+	sess->search_attrs = NULL;
+	sess->search_attrs_count = 0;
+
+	LOCK_MUTEX(sess_mutex);
+
+	/*
+	 * See if we can find a free slot in our session list
+	 */
+
+	for (i = 0; i < sess_list_size; i++) {
+		if (sess_list[i] == NULL) {
+			sess_list[i] = sess;
+			*session = i;
+			goto out;
+		}
+	}
+
+	/*
+	 * Looks like we need to grow the session list
+	 */
+
+	sess_list_size += 5;
+
+	sess_list = realloc(sess_list, sess_list_size * sizeof(*sess_list));
+
+	for (i = sess_list_count + 1; i < sess_list_size; i++)
+		sess_list[i] = NULL;
+
+	sess_list[sess_list_count] = sess;
+
+	*session = sess_list_count++;
+out:
+	UNLOCK_MUTEX(sess_mutex);
 
 	RET(C_OpenSession, CKR_OK);
 }
 
 CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 {
+	struct session *se;
+
 	FUNCINITCHK(C_CloseSession);
 
 	os_log_debug(logsys, "session = %d", (int) session);
 
-	return CKR_OK;
+	CHECKSESSION(session, se);
+
+	DESTROY_MUTEX(se->mutex);
+	free(se);
+	sess_list[session] = NULL;
+
+	RET(C_CloseSession, CKR_OK);
 }
 
 NOTSUPPORTED(C_CloseAllSessions, (CK_SLOT_ID slot_id))
@@ -719,18 +840,18 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 	os_log_debug(logsys, "session = %d, session_info = %p",
 		     (int) session, session_info);
 
-	if (session != SESSION_HANDLE)
-		return CKR_SESSION_HANDLE_INVALID;
+	if (session > sess_list_count || sess_list[session] == NULL)
+		RET(C_GetSessionInfo, CKR_SESSION_HANDLE_INVALID);
 
 	if (!session_info)
-		return CKR_ARGUMENTS_BAD;
+		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
 	session_info->slotID = KEYCHAIN_SLOT;
 	session_info->state = CKS_RO_USER_FUNCTIONS;
 	session_info->flags = CKF_SERIAL_SESSION;
 	session_info->ulDeviceError = 0;
 
-	return CKR_OK;
+	RET(C_GetSessionInfo, CKR_OK);
 }
 
 NOTSUPPORTED(C_GetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstate, CK_ULONG_PTR opstatelen))
@@ -750,13 +871,13 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		     "pinlen = %lu", (int) session, usertype, pin, pinlen);
 
 	if (session != SESSION_HANDLE)
-		return CKR_SESSION_HANDLE_INVALID;
+		RET(C_Login, CKR_SESSION_HANDLE_INVALID);
 
 	if (pin)
 		os_log_debug(logsys, "PIN was set, but it shouldn't have "
 			     "been, but we are ignoring that for now");
 
-	return CKR_OK;
+	RET(C_Login, CKR_OK);
 }
 
 CK_RV C_Logout(CK_SESSION_HANDLE session)
@@ -767,7 +888,7 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 
 	/* Right now a no-op */
 
-	return CKR_OK;
+	RET(C_Logout, CKR_OK);
 }
 
 NOTSUPPORTED(C_CreateObject, (CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template, CK_ULONG num_attributes, CK_OBJECT_HANDLE_PTR object))
@@ -846,6 +967,7 @@ NOTSUPPORTED(C_SetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE o
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 			CK_ULONG count)
 {
+	struct session *se;
 	int i;
 
 	FUNCINITCHK(C_FindObjectsInit);
@@ -853,32 +975,40 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 	os_log_debug(logsys, "session = %d, template = %p, count = %lu",
 		     (int) session, template, count);
 
-	if (obj_list_count == 0)
-		build_objects();
+	CHECKSESSION(session, se);
 
-	obj_search_index = 0;
+	LOCK_MUTEX(se->mutex);
+
+	if (se->obj_list_count == 0)
+		build_objects(se);
+
+	se->obj_search_index = 0;
 
 	/*
 	 * Copy all of our attributes to search against later
 	 */
 
-	search_attrs = count ? malloc(sizeof(CK_ATTRIBUTE) * count) : NULL;
-	search_attrs_count = count;
+	se->search_attrs = count ? malloc(sizeof(CK_ATTRIBUTE) * count) : NULL;
+	se->search_attrs_count = count;
 
 	for (i = 0; i < count; i++) {
-		search_attrs[i].type = template[i].type;
-		search_attrs[i].ulValueLen = template[i].ulValueLen;
-		if (search_attrs[i].ulValueLen == CK_UNAVAILABLE_INFORMATION) {
-			search_attrs[i].pValue = NULL;
+		se->search_attrs[i].type = template[i].type;
+		se->search_attrs[i].ulValueLen = template[i].ulValueLen;
+		if (se->search_attrs[i].ulValueLen ==
+					CK_UNAVAILABLE_INFORMATION) {
+			se->search_attrs[i].pValue = NULL;
 		} else {
-			search_attrs[i].pValue = malloc(search_attrs[i].ulValueLen);
-			memcpy(search_attrs[i].pValue, template[i].pValue,
-			       search_attrs[i].ulValueLen);
+			se->search_attrs[i].pValue =
+					malloc(se->search_attrs[i].ulValueLen);
+			memcpy(se->search_attrs[i].pValue, template[i].pValue,
+			       se->search_attrs[i].ulValueLen);
 		}
-		dump_attribute("Search template", &search_attrs[i]);
+		dump_attribute("Search template", &se->search_attrs[i]);
 	}
 
-	return CKR_OK;
+	UNLOCK_MUTEX(se->mutex);
+
+	RET(C_FindObjectsInit, CKR_OK);
 }
 
 /*
@@ -918,19 +1048,27 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 
 CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE session)
 {
+	struct session *se;
 	int i;
 
 	FUNCINITCHK(C_FindObjectsFinal);
 
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(se->mutex);
+
 	os_log_debug(logsys, "session = %d", (int) session);
 
-	for (i = 0; i < search_attrs_count; i++)
-		free(search_attrs[i].pValue);
+	for (i = 0; i < se->search_attrs_count; i++)
+		free(se->search_attrs[i].pValue);
 
-	free(search_attrs);
-	search_attrs_count = 0;
+	free(se->search_attrs);
+	se->search_attrs = NULL;
+	se->search_attrs_count = 0;
 
-	return CKR_OK;
+	UNLOCK_MUTEX(se->mutex);
+
+	RET(C_FindObjectsFinal, CKR_OK);
 }
 
 NOTSUPPORTED(C_EncryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
@@ -950,11 +1088,6 @@ NOTSUPPORTED(C_DigestFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR digest, CK_U
 /*
  * Start a signature operation
  */
-
-/* XXX Fix when we implement sessions */
-
-static SecKeyAlgorithm sig_alg;
-static CK_OBJECT_HANDLE sig_obj;
 
 CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		 CK_OBJECT_HANDLE object)
@@ -1429,9 +1562,9 @@ add_identity(CFDictionaryRef dict)
  */
 
 static void
-log_init(void)
+log_init(void *context)
 {
-	logsys = os_log_create("mil.navy.nrl.cmf.pkcs11", "general");
+	logsys = os_log_create(APP_DOMAIN, "general");
 }
 
 /*
@@ -1682,6 +1815,8 @@ build_objects(void)
 	if (obj_list_count > 0)
 		free_objects();
 
+	LOCK_MUTEX(id_mutex);
+
 	if (id_list_count > 0) {
 		/* Prime the pump */
 		NEW_OBJECT();
@@ -1757,6 +1892,8 @@ do { \
 
 		NEW_OBJECT();
 	}
+
+	UNLOCK_MUTEX(id_mutex);
 }
 
 /*
