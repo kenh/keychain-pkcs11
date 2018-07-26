@@ -17,6 +17,12 @@
 #include "tables.h"
 #include "config.h"
 
+/*
+ * The domain we use for our application; used by log messages and preferences
+ */
+
+#define APP_DOMAIN "mil.navy.nrl.cmf.pkcs11"
+
 /* We currently support 2.40 of Cryptoki */
 
 #define CK_MAJOR_VERSION 2
@@ -198,6 +204,7 @@ static void sprintfpad(unsigned char *, size_t, const char *, ...);
 static void logtype(const char *, CFTypeRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 static char *getstrcopy(CFStringRef);
+static bool prefkey_found(const char *, const char *);
 #ifdef KEYCHAIN_DEBUG
 static void dumpdict(const char *, CFDictionaryRef);
 #endif /* KEYCHAIN_DEBUG */
@@ -495,6 +502,8 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 {
+	const char *progname;
+
 	FUNCINITCHK(C_GetTokenInfo);
 
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
@@ -503,7 +512,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	CHECKSLOT(slot_id);
 
 	if (! token_info)
-	RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
+		RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
 
 	/*
 	 * Since this is used as label in a number of places to display
@@ -545,14 +554,31 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	/*
 	 * We can't do any administrative operations, really, from the
 	 * Security framework, so basically make it so the token is
-	 * read/only.  Right now we set CKF_PROTECTED_AUTHENTICATION_PATH
-	 * which means we will count on the Security framework on popping
-	 * up a user dialog to ask for the PIN; we might change that later.
+	 * read/only.
 	 */
 	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
 			    CKF_USER_PIN_INITIALIZED |
-			    /* CKF_PROTECTED_AUTHENTICATION_PATH | */
 			    CKF_TOKEN_INITIALIZED;
+			    /* CKF_PROTECTED_AUTHENTICATION_PATH | */
+	/*
+	 * Right now we set CKF_PROTECTED_AUTHENTICATION_PATH
+	 * which means we will count on the Security framework on popping
+	 * up a user dialog to ask for the PIN; we might change that later.
+	 */
+
+	progname = getprogname();
+
+	if (! prefkey_found("askPIN", progname)) {
+		os_log_debug(logsys, "Program \"%{public}s\" is NOT set to "
+			     "ask for PIN, setting "
+			     "PROTECTED_AUTHENTICATION_PATH", progname);
+		token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
+	} else {
+		os_log_debug(logsys, "Program \"%{public}s\" is set to ask "
+			     "for a PIN, NOT setting "
+			     "PROTECTED_AUTHENTICATION_PATH", progname);
+	}
+
 	token_info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
 	token_info->ulSessionCount = CK_EFFECTIVELY_INFINITE;
 	token_info->ulMaxRwSessionCount = 0;
@@ -1850,4 +1876,57 @@ dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
 			     getCKAName(attr->type), attr->ulValueLen,
 					attr->pValue);
 	}
+}
+
+/*
+ * See if a particular key is set in our preferences dictionary.
+ *
+ * It may be a single string, or an array (that's all we support right now).
+ * Return true if it matches (or was found in the array).
+ */
+
+static bool
+prefkey_found(const char *key, const char *value)
+{
+	CFTypeID id;
+	CFPropertyListRef propref;
+	CFStringRef keyref, valref;
+	bool ret = false;
+
+	keyref = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
+
+	propref = CFPreferencesCopyAppValue(keyref, CFSTR(APP_DOMAIN));
+	CFRelease(keyref);
+
+	if (! propref)
+		return false;
+
+	valref = CFStringCreateWithCString(NULL, value, kCFStringEncodingUTF8);
+
+	id = CFGetTypeID(propref);
+
+	if (id == CFStringGetTypeID()) {
+		/*
+		 * If this is a string, then it's a single application
+		 * name.  See if it is equal.
+		 */
+		ret = CFEqual(valref, propref);
+	} else if (id == CFArrayGetTypeID()) {
+		/*
+		 * This should be a list of application names, so
+		 * search the array to see if our key is in there.
+		 * They should be a series of CFStrings.
+		 */
+		ret = CFArrayContainsValue(propref,
+				     CFRangeMake(0, CFArrayGetCount(propref)),
+				     valref);
+	} else {
+		logtype("Unknown preference return type", propref);
+		ret = false;
+	}
+
+	CFRelease(valref);
+	CFRelease(propref);
+
+	return ret;
 }
