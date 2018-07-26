@@ -184,9 +184,11 @@ static kc_mutex id_mutex;
 
 static void sprintfpad(unsigned char *, size_t, const char *, ...);
 static void logtype(const char *, CFTypeRef);
-static void dumpdict(const char *, CFDictionaryRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 static char *getstrcopy(CFStringRef);
+#ifdef KEYCHAIN_DEBUG
+static void dumpdict(const char *, CFDictionaryRef);
+#endif /* KEYCHAIN_DEBUG */
 
 /*
  * Stuff required for logging; we're using the MacOS X native os_log
