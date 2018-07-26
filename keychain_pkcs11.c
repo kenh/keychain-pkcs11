@@ -1507,27 +1507,6 @@ dumpdict(const char *string, CFDictionaryRef dict)
  * many.
  */
 
-/*
- * Because we have to have compile-time constants in a statically-declared
- * initializer, we are declaring the Security framework key type attributes
- * as POINTERS to the attributes (those can be resolved at link time).
- * We dereference them when we need them below.
- */
-
-static struct {
-	const char *keyname;
-	CK_KEY_TYPE pkcs11_keytype;
-	const CFStringRef *sec_keytype;
-} keytype_map[] = {
-	{ "RSA Key", CKK_RSA, &kSecAttrKeyTypeRSA },
-	{ "DSA Key", CKK_DSA, &kSecAttrKeyTypeDSA },
-	{ "AES Key", CKK_AES, &kSecAttrKeyTypeAES },
-	{ "DES Key", CKK_DES, &kSecAttrKeyTypeDES },
-	{ "3DES Key", CKK_DES3, &kSecAttrKeyType3DES },
-	{ "EC Key", CKK_EC, &kSecAttrKeyTypeEC },
-	{ NULL, 0, NULL },
-};
-
 static CK_KEY_TYPE
 convert_keytype(CFNumberRef type)
 {

@@ -32,3 +32,17 @@ struct mechanism_map keychain_mechmap[] = {
 
 unsigned int keychain_mechmap_size = sizeof(keychain_mechmap)/
 						sizeof(keychain_mechmap[0]);
+
+/*
+ * Mapping of Security framework constants to Cryptoki constants
+ */
+
+struct keymap keytype_map[] = {
+        { "RSA Key", CKK_RSA, &kSecAttrKeyTypeRSA },
+	{ "DSA Key", CKK_DSA, &kSecAttrKeyTypeDSA },
+	{ "AES Key", CKK_AES, &kSecAttrKeyTypeAES },
+	{ "DES Key", CKK_DES, &kSecAttrKeyTypeDES },
+	{ "3DES Key", CKK_DES3, &kSecAttrKeyType3DES },
+	{ "EC Key", CKK_EC, &kSecAttrKeyTypeEC },
+	{ NULL, 0, NULL },
+};

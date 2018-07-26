@@ -39,3 +39,20 @@ struct mechanism_map {
 
 extern struct mechanism_map keychain_mechmap[];
 extern unsigned int keychain_mechmap_size;
+
+/*
+ * Table used for mapping between Cryptoki key types and Security
+ * framework key types.  The same rules apply as above; we use pointers
+ * to the Security framework constants so they can be resolved at compile
+ * time and will need to be dereferenced when you actually use them.
+ *
+ * This array is terminated by a NULL pointer for the keyname.
+ */
+
+struct keymap {
+	const char	*keyname;	/* User-printable name of keytype */
+	CK_KEY_TYPE	pkcs11_keytype;	/* Cryptoki constant for key type */
+	const CFStringRef *sec_keytype;	/* Security constant for key type */
+};
+
+extern struct keymap keytype_map[];
