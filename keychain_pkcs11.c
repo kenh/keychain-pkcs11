@@ -180,6 +180,8 @@ struct session {
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
 static unsigned int sess_list_count = 0;
 static unsigned int sess_list_size = 0;
+static void sess_free(struct session *);
+static void sess_list_free(void);
 
 /*
  * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
@@ -188,12 +190,15 @@ static unsigned int sess_list_size = 0;
 
 #define CHECKSESSION(session, var) \
 do { \
+	LOCK_MUTEX(sess_mutex); \
 	if (session > sess_list_count || sess_list[session] == NULL) { \
 		os_log_debug(logsys, "Session handle %lu is invalid, " \
 			     "returning CKR_SESSION_HANDLE_INVALID", session); \
+		UNLOCK_MUTEX(sess_mutex); \
 		return CKR_SESSION_HANDLE_INVALID; \
 	} \
 	var = sess_list[session]; \
+	UNLOCK_MUTEX(sess_mutex); \
 } while (0)
 
 /*
@@ -220,14 +225,12 @@ struct obj_info {
 	unsigned int		attr_size;
 };
 
-static struct obj_info *obj_list = NULL;
-
-#define LOG_DEBUG_OBJECT(obj) \
+#define LOG_DEBUG_OBJECT(obj, se) \
 	os_log_debug(logsys, "Object %lu (%s)", obj, \
-		     getCKOName(obj_list[obj].class));
+		     getCKOName(se->obj_list[obj].class));
 
 static void build_objects(struct session *);
-static void free_objects(void);
+static void obj_free(struct obj_info *, unsigned int);
 
 /*
  * Our attribute list used for searching
@@ -403,8 +406,8 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	}
 
 	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(sess_mutex);
 
-	obj_list_free();
 	id_list_free();
 
 	UNLOCK_MUTEX(id_mutex);
@@ -826,14 +829,27 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
-	DESTROY_MUTEX(se->mutex);
-	free(se);
+	LOCK_MUTEX(sess_mutex);
+
+	sess_free(se);
+
 	sess_list[session] = NULL;
+
+	UNLOCK_MUTEX(sess_mutex);
 
 	RET(C_CloseSession, CKR_OK);
 }
 
-NOTSUPPORTED(C_CloseAllSessions, (CK_SLOT_ID slot_id))
+CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
+{
+	CHECKSLOT(slot_id);
+
+	LOCK_MUTEX(sess_mutex);
+	sess_list_free();
+	UNLOCK_MUTEX(sess_mutex);
+
+	RET(C_CloseAllSessions, CKR_OK);
+}
 
 CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		       CK_SESSION_INFO_PTR session_info)
@@ -906,6 +922,7 @@ NOTSUPPORTED(C_GetObjectSize, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE objec
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 			  CK_ATTRIBUTE_PTR template, CK_ULONG count)
 {
+	struct session *se;
 	CK_RV rv = CKR_OK;
 	int i;
 	CK_ATTRIBUTE_PTR attr;
@@ -916,15 +933,21 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 		     "count = %d", (int) session, (int) object, template,
 		     (int) count);
 
-	if (object >= obj_list_count)
-		return CKR_OBJECT_HANDLE_INVALID;
+	CHECKSESSION(session, se);
 
-	LOG_DEBUG_OBJECT(object);
+	LOCK_MUTEX(se->mutex);
+
+	if (object >= se->obj_list_count) {
+		UNLOCK_MUTEX(se->mutex);
+		RET(C_GetAttributeValue, CKR_OBJECT_HANDLE_INVALID);
+	}
+
+	LOG_DEBUG_OBJECT(object, se);
 
 	for (i = 0; i < count; i++) {
 		os_log_debug(logsys, "Retrieving attribute: %s",
 			     getCKAName(template[i].type));
-		if ((attr = find_attribute(&obj_list[object],
+		if ((attr = find_attribute(&se->obj_list[object],
 					   template[i].type))) {
 			if (! template[i].pValue) {
 				template[i].ulValueLen = attr->ulValueLen;
@@ -959,10 +982,9 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 		}
 	}
 
-	os_log_debug(logsys, "C_GetAttributeValue: returning %s",
-		     getCKRName(rv));
+	UNLOCK_MUTEX(se->mutex);
 
-	return rv;
+	RET(C_GetAttributeValue, rv);
 }
 
 NOTSUPPORTED(C_SetAttributeValue, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object, CK_ATTRIBUTE_PTR template, CK_ULONG count))
@@ -1022,6 +1044,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 		    CK_ULONG maxcount, CK_ULONG_PTR count)
 {
+	struct session *se;
 	unsigned int rc = 0;
 
 	FUNCINITCHK(C_FindObjects);
@@ -1029,24 +1052,31 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 	os_log_debug(logsys, "session = %d, objhandle = %p, maxcount = %lu, "
 		     "count = %p", (int) session, object, maxcount, count);
 
-	if (! object || maxcount == 0)
-		return CKR_ARGUMENTS_BAD;
+	CHECKSESSION(session, se);
 
-	for (; obj_search_index < obj_list_count; obj_search_index++) {
-		if (search_object(&obj_list[obj_search_index], search_attrs,
-				  search_attrs_count)) {
-			object[rc++] = obj_search_index;
+	if (! object || maxcount == 0)
+		RET(C_FindObjects, CKR_ARGUMENTS_BAD);
+
+	LOCK_MUTEX(se->mutex);
+
+	for (; se->obj_search_index < se->obj_list_count;
+						se->obj_search_index++) {
+		if (search_object(&se->obj_list[se->obj_search_index],
+				  se->search_attrs, se->search_attrs_count)) {
+			object[rc++] = se->obj_search_index;
 			if (rc >= maxcount) {
 				*count = rc;
-				obj_search_index++;
-				return CKR_OK;
+				se->obj_search_index++;
+				UNLOCK_MUTEX(se->mutex);
+				RET(C_FindObjects, CKR_OK);
 			}
 		}
 	}
 
 	*count = rc;
 
-	return CKR_OK;
+	UNLOCK_MUTEX(se->mutex);
+	RET(C_FindObjects, CKR_OK);
 }
 
 CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE session)
@@ -1095,6 +1125,7 @@ NOTSUPPORTED(C_DigestFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR digest, CK_U
 CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		 CK_OBJECT_HANDLE object)
 {
+	struct session *se;
 	int i;
 
 	FUNCINITCHK(C_SignInit);
@@ -1102,11 +1133,33 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
 		    (int) session, getCKMName(mech->mechanism), (int) object);
 
-	if (object > obj_list_count - 1)
-		return CKR_KEY_HANDLE_INVALID;
+	CHECKSESSION(session, se);
 
-	if (! id_list[obj_list[object].id_index].privcansign)
-		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	if (object >= se->obj_list_count) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_SignInit, CKR_KEY_HANDLE_INVALID);
+	}
+
+	if (! id_list[se->obj_list[object].id_index].privcansign) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+	}
+
+	/*
+	 * Right now we are assuming only a private key can do signing.
+	 * Change this assumption in the future if necessary
+	 */
+
+	if (se->obj_list[object].class != CKO_PRIVATE_KEY) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_SignInit, CKR_KEY_TYPE_INCONSISTENT);
+	}
 
 	/*
 	 * Map our mechanism onto what we need for signing
@@ -1114,13 +1167,19 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			sig_obj = object;
-			sig_alg = *keychain_mechmap[i].sec_signmech;
-			return CKR_OK;
+			se->sig_obj = object;
+			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+
+			UNLOCK_MUTEX(se->mutex);
+			UNLOCK_MUTEX(id_mutex);
+			RET(C_SignInit, CKR_OK);
 		}
 	}
 
-	return CKR_MECHANISM_INVALID;
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_SignInit, CKR_MECHANISM_INVALID);
 }
 
 /*
@@ -1129,6 +1188,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	     CK_BYTE_PTR sig, CK_ULONG_PTR siglen)
 {
+	struct session *se;
 	CFDataRef inref, outref;
 	CFErrorRef err;
 	CK_RV rv = CKR_OK;
@@ -1141,6 +1201,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
 		     "outdata = %p, outlen = %d", (int) session, indata,
 		     (int) indatalen, sig, (int) *siglen);
+
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
 
 #ifdef KEYCHAIN_DEBUG
 	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_DATAFILE"))) {
@@ -1159,16 +1224,18 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 
-	outref = SecKeyCreateSignature(id_list[obj_list[sig_obj].id_index].privkey,
-				       sig_alg, inref, &err);
+	outref = SecKeyCreateSignature(id_list[se->obj_list[se->sig_obj].id_index].privkey,
+				       se->sig_alg, inref, &err);
 
 	CFRelease(inref);
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
 
 	if (! outref) {
 		os_log_debug(logsys, "SecKeyCreateSignature failed: "
 			     "%{public}@", err);
 		CFRelease(err);
-		return CKR_GENERAL_ERROR;
+		RET(C_Sign, CKR_GENERAL_ERROR);
 	}
 
 	if (*siglen < CFDataGetLength(outref)) {
@@ -1194,7 +1261,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		}
 	}
 #endif /* KEYCHAIN_DEBUG */
-	return rv;
+	RET(C_Sign, rv); ;
 }
 
 NOTSUPPORTED(C_SignUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
@@ -1205,6 +1272,7 @@ NOTSUPPORTED(C_SignRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_U
 CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		   CK_OBJECT_HANDLE key)
 {
+	struct session *se;
 	int i;
 
 	FUNCINITCHK(C_VerifyInit);
@@ -1212,11 +1280,28 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
 		    (int) session, getCKMName(mech->mechanism), (int) key);
 
-	if (key > obj_list_count - 1)
-		return CKR_KEY_HANDLE_INVALID;
+	CHECKSESSION(session, se);
 
-	if (! id_list[obj_list[key].id_index].pubcanverify)
-		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	if (key >= se->obj_list_count) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_VerifyInit, CKR_KEY_HANDLE_INVALID);
+	}
+		
+	if (! id_list[se->obj_list[key].id_index].pubcanverify) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_VerifyInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+	}
+
+	if (se->obj_list[key].class != CKO_PUBLIC_KEY) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_SignInit, CKR_KEY_TYPE_INCONSISTENT);
+	}
 
 	/*
 	 * Map our mechanism onto what we need for verification
@@ -1224,18 +1309,24 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			sig_obj = key;
-			sig_alg = *keychain_mechmap[i].sec_signmech;
-			return CKR_OK;
+			se->sig_obj = key;
+			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+			UNLOCK_MUTEX(se->mutex);
+			UNLOCK_MUTEX(id_mutex);
+			RET(C_VerifyInit, CKR_OK);
 		}
 	}
 
-	return CKR_MECHANISM_INVALID;
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_VerifyInit, CKR_MECHANISM_INVALID);
 }
 
 CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	       CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG siglen)
 {
+	struct session *se;
 	CFDataRef inref, sigref;
 	CFErrorRef err;
 	CK_RV rv = CKR_OK;
@@ -1246,22 +1337,29 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		     "outdata = %p, outlen = %d", (int) session, indata,
 		     (int) indatalen, sig, (int) siglen);
 
+	CHECKSESSION(session, se);
+
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 	sigref = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
 					     kCFAllocatorNull);
 
-	if (!SecKeyVerifySignature(id_list[obj_list[sig_obj].id_index].pubkey,
-				       sig_alg, inref, sigref, &err)) {
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	if (!SecKeyVerifySignature(id_list[se->obj_list[se->sig_obj].id_index].pubkey,
+				       se->sig_alg, inref, sigref, &err)) {
 		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
 		CFRelease(err);
 		rv = CKR_SIGNATURE_INVALID;
 	}
 
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
 	CFRelease(inref);
 	CFRelease(sigref);
 
-	return rv;
+	RET(C_Verify, rv);
 }
 
 NOTSUPPORTED(C_VerifyUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
@@ -1779,25 +1877,25 @@ convert_keytype(CFNumberRef type)
 do { \
 	void *p = malloc(size); \
 	memcpy(p, var, size); \
-	if (obj_list[obj_list_count].attr_count >= \
-	    obj_list[obj_list_count].attr_size) { \
-		obj_list[obj_list_count].attr_size += 5; \
-		obj_list[obj_list_count].attrs = realloc(obj_list[obj_list_count].attrs, \
-			obj_list[obj_list_count].attr_size * sizeof(CK_ATTRIBUTE)); \
+	if (se->obj_list[se->obj_list_count].attr_count >= \
+	    se->obj_list[se->obj_list_count].attr_size) { \
+		se->obj_list[se->obj_list_count].attr_size += 5; \
+		se->obj_list[se->obj_list_count].attrs = realloc(se->obj_list[se->obj_list_count].attrs, \
+			se->obj_list[se->obj_list_count].attr_size * sizeof(CK_ATTRIBUTE)); \
 	} \
-	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].type = attribute; \
-	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].pValue = p; \
-	obj_list[obj_list_count].attrs[obj_list[obj_list_count].attr_count].ulValueLen = size; \
-	obj_list[obj_list_count].attr_count++; \
+	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].type = attribute; \
+	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].pValue = p; \
+	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].ulValueLen = size; \
+	se->obj_list[se->obj_list_count].attr_count++; \
 } while (0)
 
 #define ADD_ATTR(attr, var) ADD_ATTR_SIZE(attr, &var, sizeof(var))
 
 #define NEW_OBJECT() \
 do { \
-	if (++obj_list_count >= obj_list_size) { \
-		obj_list_size += 5; \
-		obj_list = realloc(obj_list, obj_list_size * sizeof(*obj_list)); \
+	if (++se->obj_list_count >= se->obj_list_size) { \
+		se->obj_list_size += 5; \
+		se->obj_list = realloc(se->obj_list, se->obj_list_size * sizeof(*se->obj_list)); \
 	} \
 } while (0)
 
@@ -1806,7 +1904,7 @@ do { \
  */
 
 static void
-build_objects(void)
+build_objects(struct session *se)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
@@ -1815,15 +1913,12 @@ build_objects(void)
 	CK_BBOOL b;
 	CFDataRef d;
 
-	if (obj_list_count > 0)
-		free_objects();
-
 	LOCK_MUTEX(id_mutex);
 
 	if (id_list_count > 0) {
 		/* Prime the pump */
 		NEW_OBJECT();
-		obj_list_count--;
+		se->obj_list_count--;
 	}
 
 	for (i = 0; i < id_list_count; i++) {
@@ -1831,10 +1926,10 @@ build_objects(void)
 
 #define OBJINIT() \
 do { \
-	obj_list[obj_list_count].id_index = i; \
-	obj_list[obj_list_count].attrs = NULL; \
-	obj_list[obj_list_count].attr_count = 0; \
-	obj_list[obj_list_count].attr_size = 0; \
+	se->obj_list[se->obj_list_count].id_index = i; \
+	se->obj_list[se->obj_list_count].attrs = NULL; \
+	se->obj_list[se->obj_list_count].attr_count = 0; \
+	se->obj_list[se->obj_list_count].attr_size = 0; \
 } while (0)
 
 		OBJINIT();
@@ -1846,7 +1941,7 @@ do { \
 
 		t = i;
 		cl = CKO_CERTIFICATE;
-		obj_list[obj_list_count].class = cl;
+		se->obj_list[se->obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
@@ -1871,7 +1966,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PUBLIC_KEY;
-		obj_list[obj_list_count].class = cl;
+		se->obj_list[se->obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
@@ -1884,7 +1979,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PRIVATE_KEY;
-		obj_list[obj_list_count].class = cl;
+		se->obj_list[se->obj_list_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
@@ -1904,17 +1999,15 @@ do { \
  */
 
 static void
-free_objects(void)
+obj_free(struct obj_info *obj, unsigned int count)
 {
 	int i, j;
 
-	for (i = 0; i < obj_list_count; i++)
-		for (j = 0; j < obj_list[i].attr_count; j++)
-			free(obj_list[i].attrs[j].pValue);
+	for (i = 0; i < count; i++)
+		for (j = 0; j < obj[i].attr_count; j++)
+			free(obj[i].attrs[j].pValue);
 
-	free(obj_list);
-
-	obj_list_count = obj_list_size = 0;
+	free(obj);
 }
 
 /*
@@ -2069,4 +2162,47 @@ prefkey_found(const char *key, const char *value)
 	CFRelease(propref);
 
 	return ret;
+}
+
+/*
+ * Free a session
+ */
+
+static void
+sess_free(struct session *se)
+{
+	int i;
+
+	LOCK_MUTEX(se->mutex);
+
+	obj_free(se->obj_list, se->obj_list_count);
+
+	for (i = 0; i < se->search_attrs_count; i++)
+		free(se->search_attrs[i].pValue);
+
+	free(se->search_attrs);
+
+	UNLOCK_MUTEX(se->mutex);
+	DESTROY_MUTEX(se->mutex);
+	free(se);
+}
+
+/*
+ * Free all sessions; call with sess_mutex locked.
+ */
+
+static void
+sess_list_free(void)
+{
+	int i;
+
+	for (i = 0; i < sess_list_count; i++)
+		if (sess_list[i])
+			sess_free(sess_list[i]);
+
+	sess_list_count = sess_list_size = 0;
+
+	free(sess_list);
+
+	sess_list = NULL;
 }
