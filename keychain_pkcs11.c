@@ -43,120 +43,6 @@ do { \
 } while (0)
 
 /*
- * Our list of identities that is stored on our smartcard
- */
-
-struct id_info {
-	SecIdentityRef		ident;
-	SecCertificateRef	cert;
-	SecKeyRef		privkey;
-	SecKeyRef		pubkey;
-	CK_KEY_TYPE		keytype;
-	char *			label;
-	bool			privcansign;
-	bool			privcandecrypt;
-	bool			pubcanverify;
-	bool			pubcanencrypt;
-};
-
-static struct id_info *id_list = NULL;
-static unsigned int id_list_count = 0;		/* Number of valid entries */
-static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
-static bool id_list_init = false;
-static bool have_slot = false;			/* True if we have a slot */
-
-static int scan_identities(void);
-static int add_identity(CFDictionaryRef);
-static void id_list_free(void);
-static CK_KEY_TYPE convert_keytype(CFNumberRef);
-
-/*
- * Our session information.  Anything that modifies a session will need to
- * lock that particular session.  We keep an array of pointers to sessions
- * available; if we need more then reallocate the array.
- *
- * Note that "sess_mutex" is for locking the overall session array,
- * but each session also has a mutex.  Sigh.  Is this overkill?  I have
- * no idea.
- *
- * SecKeyAlgorithms are currently constant CFStringRef so we shouldn't
- * have to worry about maintaing references to it using CFRetain/CFRelease().
- */
-
-struct session {
-	kc_mutex 	mutex;			/* Session mutex */
-	struct obj_info *obj_list;		/* Objects list */
-	unsigned int	obj_list_count;		/* Object list count */
-	unsigned int	obj_list_size;		/* Size of obj_list */
-	unsigned int	obj_search_index;	/* Current search index */
-	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
-	unsigned int	search_attrs_count;	/* Search attribute count */
-	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
-	CK_OBJECT_HANDLE sig_obj;		/* Key object for signing */
-	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
-	CK_OBJECT_HANDLE ver_obj;		/* Verify object */
-};
-
-static struct session **sess_list = NULL;	/* Yes, array of pointers */
-static unsigned int sess_list_count = 0;
-static unsigned int sess_list_size = 0;
-
-/*
- * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
- * for this handle
- */
-
-#define CHECKSESSION(session, var) \
-do { \
-	if (session > sess_list_count || sess_list[session] == NULL) { \
-		os_log_debug(logsys, "Session handle %lu is invalid, " \
-			     "returning CKR_SESSION_HANDLE_INVALID", session); \
-		return CKR_SESSION_HANDLE_INVALID; \
-	} \
-	var = sess_list[session];
-while (0)
-
-/*
- * Our object list and the functions to handle them
- *
- * The object types we support are:
- *
- * Certificates (CKO_CERTFICATE).  We only support X.509 certificates
- * Public keys (CKO_PUBLIC_KEY).
- * Private keys (CKO_PRIVATE_KEY).
- * 
- * The general rule is the CKA_ID attribute for any of those should all
- * match for a given identity.  I implemented this so the CKA_ID
- * is a CK_ULONG that is an index into our identity array.
- */
-
-struct obj_info {
-	unsigned int		id_index;
-	unsigned char		id_value[sizeof(CK_ULONG)];
-	CK_OBJECT_CLASS		class;
-	CK_ATTRIBUTE_PTR	attrs;
-	unsigned int		attr_count;
-	unsigned int		attr_size;
-};
-
-static struct obj_info *obj_list = NULL;
-
-#define LOG_DEBUG_OBJECT(obj) \
-	os_log_debug(logsys, "Object %lu (%s)", obj, \
-		     getCKOName(obj_list[obj].class));
-
-static void build_objects(struct session *);
-static void free_objects(void);
-
-/*
- * Our attribute list used for searching
- */
-
-static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
-static CK_ATTRIBUTE_PTR find_attribute(struct obj_info *, CK_ATTRIBUTE_TYPE);
-static void dump_attribute(const char *, CK_ATTRIBUTE_PTR);
-
-/*
  * Handling PKCS11 locking.  If we can use native locking with pthreads
  * (CKF_OS_LOCKING_OK) then we do that.  Otherwise we use the API-suppled
  * mutex calls.
@@ -235,6 +121,122 @@ do { \
 
 static kc_mutex id_mutex;
 static kc_mutex sess_mutex;
+
+/*
+ * Our list of identities that is stored on our smartcard
+ */
+
+struct id_info {
+	SecIdentityRef		ident;
+	SecCertificateRef	cert;
+	SecKeyRef		privkey;
+	SecKeyRef		pubkey;
+	CK_KEY_TYPE		keytype;
+	char *			label;
+	bool			privcansign;
+	bool			privcandecrypt;
+	bool			pubcanverify;
+	bool			pubcanencrypt;
+};
+
+static struct id_info *id_list = NULL;
+static unsigned int id_list_count = 0;		/* Number of valid entries */
+static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
+static bool id_list_init = false;
+static bool have_slot = false;			/* True if we have a slot */
+
+static int scan_identities(void);
+static int add_identity(CFDictionaryRef);
+static void id_list_free(void);
+static CK_KEY_TYPE convert_keytype(CFNumberRef);
+
+/*
+ * Our session information.  Anything that modifies a session will need to
+ * lock that particular session.  We keep an array of pointers to sessions
+ * available; if we need more then reallocate the array.
+ *
+ * Note that "sess_mutex" is for locking the overall session array,
+ * but each session also has a mutex.  Sigh.  Is this overkill?  I have
+ * no idea.
+ *
+ * SecKeyAlgorithms are currently constant CFStringRef so we shouldn't
+ * have to worry about maintaing references to it using CFRetain/CFRelease().
+ */
+
+struct session {
+	kc_mutex 	mutex;			/* Session mutex */
+	struct obj_info *obj_list;		/* Objects list */
+	unsigned int	obj_list_count;		/* Object list count */
+	unsigned int	obj_list_size;		/* Size of obj_list */
+	unsigned int	obj_search_index;	/* Current search index */
+	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
+	unsigned int	search_attrs_count;	/* Search attribute count */
+	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
+	CK_OBJECT_HANDLE sig_obj;		/* Key object for signing */
+	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
+	CK_OBJECT_HANDLE ver_obj;		/* Verify object */
+};
+
+static struct session **sess_list = NULL;	/* Yes, array of pointers */
+static unsigned int sess_list_count = 0;
+static unsigned int sess_list_size = 0;
+
+/*
+ * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
+ * for this handle
+ */
+
+#define CHECKSESSION(session, var) \
+do { \
+	if (session > sess_list_count || sess_list[session] == NULL) { \
+		os_log_debug(logsys, "Session handle %lu is invalid, " \
+			     "returning CKR_SESSION_HANDLE_INVALID", session); \
+		return CKR_SESSION_HANDLE_INVALID; \
+	} \
+	var = sess_list[session]; \
+} while (0)
+
+/*
+ * Our object list and the functions to handle them
+ *
+ * The object types we support are:
+ *
+ * Certificates (CKO_CERTFICATE).  We only support X.509 certificates
+ * Public keys (CKO_PUBLIC_KEY).
+ * Private keys (CKO_PRIVATE_KEY).
+ * 
+ * The general rule is the CKA_ID attribute for any of those should all
+ * match for a given identity.  I implemented this so the CKA_ID
+ * is a CK_ULONG that is an index into our identity array.  This is
+ * arbitrary; we could just match on any byte string.
+ */
+
+struct obj_info {
+	unsigned int		id_index;
+	unsigned char		id_value[sizeof(CK_ULONG)];
+	CK_OBJECT_CLASS		class;
+	CK_ATTRIBUTE_PTR	attrs;
+	unsigned int		attr_count;
+	unsigned int		attr_size;
+};
+
+static struct obj_info *obj_list = NULL;
+
+#define LOG_DEBUG_OBJECT(obj) \
+	os_log_debug(logsys, "Object %lu (%s)", obj, \
+		     getCKOName(obj_list[obj].class));
+
+static void build_objects(struct session *);
+static void free_objects(void);
+
+/*
+ * Our attribute list used for searching
+ */
+
+static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
+static CK_ATTRIBUTE_PTR find_attribute(struct obj_info *, CK_ATTRIBUTE_TYPE);
+static void dump_attribute(const char *, CK_ATTRIBUTE_PTR);
+
 /*
  * Various other utility functions we need
  */
@@ -756,6 +758,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		    CK_SESSION_HANDLE_PTR session)
 {
 	struct session *sess;
+	int i;
 
 	FUNCINITCHK(C_OpenSession);
 
@@ -865,13 +868,13 @@ NOTSUPPORTED(C_SetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstat
 CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	      CK_UTF8CHAR_PTR pin, CK_ULONG pinlen)
 {
+	struct session *se;
 	FUNCINITCHK(C_Login);
 
 	os_log_debug(logsys, "session = %d, user_type = %lu, pin = %s, "
 		     "pinlen = %lu", (int) session, usertype, pin, pinlen);
 
-	if (session != SESSION_HANDLE)
-		RET(C_Login, CKR_SESSION_HANDLE_INVALID);
+	CHECKSESSION(session, se);
 
 	if (pin)
 		os_log_debug(logsys, "PIN was set, but it shouldn't have "
