@@ -544,7 +544,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 		  id_list_count > 0 ? id_list[0].label :
 		  	"Keychain PKCS#11 Bridge Library Virtual Slot");
 	sprintfpad(slot_info->manufacturerID,
-		   sizeof(slot_info->slotDescription), "%s",
+		   sizeof(slot_info->manufacturerID), "%s",
 		   "U.S. Naval Research Lab");
 
 	slot_info->flags = CKF_HW_SLOT;
