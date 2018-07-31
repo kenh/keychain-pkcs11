@@ -172,9 +172,10 @@ struct session {
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
 	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
-	CK_OBJECT_HANDLE sig_obj;		/* Key object for signing */
+	SecKeyRef	sig_key;		/* Key for signing */
+	size_t		sig_size;		/* Size of sig, 0 is unknown */
 	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
-	CK_OBJECT_HANDLE ver_obj;		/* Verify object */
+	SecKeyRef	ver_key;		/* Verify key */
 };
 
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
@@ -784,6 +785,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->obj_list_size = 0;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
+	sess->sig_key = NULL;
+	sess->ver_key = NULL;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1119,7 +1122,9 @@ NOTSUPPORTED(C_DigestKey, (CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_DigestFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR digest, CK_ULONG_PTR digestlen))
 
 /*
- * Start a signature operation
+ * Start a signature operation.  Our global assumption is that the signature
+ * is only done with a private key; if that changes then we need to change
+ * this code.
  */
 
 CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
@@ -1167,8 +1172,17 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			se->sig_obj = object;
+			if (se->sig_key)
+				CFRelease(se->sig_key);
+			se->sig_key =
+				id_list[se->obj_list[object].id_index].privkey;
+			CFRetain(se->sig_key);
 			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+			if (keychain_mechmap[i].blocksize_out) {
+				se->sig_size = SecKeyGetBlockSize(se->sig_key);
+			} else {
+				se->sig_size = 0;
+			}
 
 			UNLOCK_MUTEX(se->mutex);
 			UNLOCK_MUTEX(id_mutex);
@@ -1221,11 +1235,22 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	}
 #endif /* KEYCHAIN_DEBUG */
 
+	/*
+	 * If we know our mechanism output size, check first to see if the
+	 * output buffer is big enough.
+	 */
+
+	if (se->sig_size && se->sig_size > *siglen) {
+		os_log_debug(logsys, "Output size is %d, but our output "
+			     "buffer is %d", (int) se->sig_size, (int) *siglen);
+		*siglen = se->sig_size;
+		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
+	}
+
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 
-	outref = SecKeyCreateSignature(id_list[se->obj_list[se->sig_obj].id_index].privkey,
-				       se->sig_alg, inref, &err);
+	outref = SecKeyCreateSignature(se->sig_key, se->sig_alg, inref, &err);
 
 	CFRelease(inref);
 	UNLOCK_MUTEX(se->mutex);
@@ -1242,6 +1267,12 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		rv = CKR_BUFFER_TOO_SMALL;
 	} else {
 		memcpy(sig, CFDataGetBytePtr(outref), CFDataGetLength(outref));
+		/*
+		 * If the signature was successful, release our key reference
+		 */
+		CFRelease(se->sig_key);
+		se->sig_key = NULL;
+		se->sig_size = 0;
 	}
 
 	*siglen = CFDataGetLength(outref);
@@ -1309,8 +1340,12 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			se->sig_obj = key;
-			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+			if (se->ver_key)
+				CFRelease(se->ver_key);
+			se->ver_key =
+				id_list[se->obj_list[key].id_index].pubkey;
+			CFRetain(se->ver_key);
+			se->ver_alg = *keychain_mechmap[i].sec_signmech;
 			UNLOCK_MUTEX(se->mutex);
 			UNLOCK_MUTEX(id_mutex);
 			RET(C_VerifyInit, CKR_OK);
@@ -1347,12 +1382,19 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	if (!SecKeyVerifySignature(id_list[se->obj_list[se->sig_obj].id_index].pubkey,
-				       se->sig_alg, inref, sigref, &err)) {
+	if (!SecKeyVerifySignature(se->ver_key, se->ver_alg, inref, sigref,
+				   &err)) {
 		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
 		CFRelease(err);
 		rv = CKR_SIGNATURE_INVALID;
 	}
+
+	/*
+	 * Always release the key reference at this point
+	 */
+
+	CFRelease(se->ver_key);
+	se->ver_key = NULL;
 
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2181,6 +2223,12 @@ sess_free(struct session *se)
 		free(se->search_attrs[i].pValue);
 
 	free(se->search_attrs);
+
+	if (se->sig_key)
+		CFRelease(se->sig_key);
+
+	if (se->ver_key)
+		CFRelease(se->ver_key);
 
 	UNLOCK_MUTEX(se->mutex);
 	DESTROY_MUTEX(se->mutex);

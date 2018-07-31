@@ -30,11 +30,20 @@ struct mechanism_map {
 	 * digest.  The digestlen is used for SHA2 mechanisms that have
 	 * varying digest lengths; if you don't need that, just set it
 	 * to 0.
+	 *
+	 * "blocksize_out" is true IF the output size of the mechanism is
+	 * the same as the block size returned by SecKeyGetBlockSize();
+	 * that lets us check to see if the given input buffer is too
+	 * small, so we only need call the SecKey* functions once which
+	 * will mean we only have one PIN prompt.  Currently this is "true"
+	 * for all mechanisms we support, but I didn't feel confident
+	 * hardcoding this for future mechanisms.
 	 */
 	const SecKeyAlgorithm	*sec_encmech;	/* Security mech for enc */
 	const SecKeyAlgorithm	*sec_signmech;	/* Security mech for sign */
 	const CFStringRef	*sec_digest;	/* Digest type used */
 	unsigned int		sec_digestlen;	/* Digest length */
+	bool			blocksize_out;	/* Is block size output? */
 };
 
 extern struct mechanism_map keychain_mechmap[];
