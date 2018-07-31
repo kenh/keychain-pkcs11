@@ -1070,12 +1070,15 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 			if (rc >= maxcount) {
 				*count = rc;
 				se->obj_search_index++;
+				os_log_debug(logsys, "Found %u object%s",
+					     rc, rc == 1 ? "" : "s");
 				UNLOCK_MUTEX(se->mutex);
 				RET(C_FindObjects, CKR_OK);
 			}
 		}
 	}
 
+	os_log_debug(logsys, "Found %u object%s", rc, rc == 1 ? "" : "s");
 	*count = rc;
 
 	UNLOCK_MUTEX(se->mutex);
@@ -1965,6 +1968,16 @@ build_objects(struct session *se)
 
 	for (i = 0; i < id_list_count; i++) {
 		SecCertificateRef cert = id_list[i].cert;
+		CFDataRef subject;
+		const unsigned char *s_data = NULL;
+		size_t s_len;
+
+		subject = SecCertificateCopyNormalizedSubjectSequence(cert);
+
+		if (subject) {
+			s_data = CFDataGetBytePtr(subject);
+			s_len = CFDataGetLength(subject);
+		}
 
 #define OBJINIT() \
 do { \
@@ -2003,6 +2016,8 @@ do { \
 		ADD_ATTR_SIZE(CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
 		CFRelease(d);
+		if (subject)
+			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
 
 		NEW_OBJECT();
 		OBJINIT();
@@ -2016,6 +2031,8 @@ do { \
 		ADD_ATTR(CKA_ENCRYPT, b);
 		b = id_list[i].pubcanverify;
 		ADD_ATTR(CKA_VERIFY, b);
+		if (subject)
+			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
 
 		NEW_OBJECT();
 		OBJINIT();
@@ -2029,8 +2046,13 @@ do { \
 		ADD_ATTR(CKA_DECRYPT, b);
 		b = id_list[i].privcansign;
 		ADD_ATTR(CKA_SIGN, b);
+		if (subject)
+			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
 
 		NEW_OBJECT();
+
+		if (subject)
+			CFRelease(subject);
 	}
 
 	UNLOCK_MUTEX(id_mutex);
