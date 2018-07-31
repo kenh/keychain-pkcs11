@@ -150,8 +150,14 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "N:n:o:S:s:v:V:")) != -1) {
+    while ((i = getopt(argc, argv, "L:N:n:o:S:s:v:V:")) != -1) {
 	switch (i) {
+	case 'L':
+	    if (! dlopen(optarg, RTLD_NOW)) {
+		fprintf(stderr, "Unable to open %s: %s\n", optarg, dlerror());
+		exit(1);
+	    }
+	    break;
 	case 'N':
 	    signsize = atoi(optarg);
 	    signbuf = malloc(signsize);
@@ -182,7 +188,8 @@ int main(int argc, char *argv[]) {
 	default:
 	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
 		    "[-N bufsize] [-S string-to-sign] [-o object] "
-		    "[-v data-file] [-V sig-file] [pkcs11_library]\n", argv[0]);
+		    "[-v data-file] [-V sig-file] [-L library-to-dlopen] "
+		    "[pkcs11_library]\n", argv[0]);
 	    exit(1);
 	}
     }
