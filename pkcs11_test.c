@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 
 /*
  * Dump one or more attributes of an object
@@ -147,10 +148,11 @@ int main(int argc, char *argv[]) {
 
     unsigned char *signbuf = NULL;
     unsigned int signsize = 0;
+    bool sleepatexit = false;
 
     int i;
 
-    while ((i = getopt(argc, argv, "L:N:n:o:S:s:v:V:")) != -1) {
+    while ((i = getopt(argc, argv, "L:N:n:o:S:s:v:V:w")) != -1) {
 	switch (i) {
 	case 'L':
 	    if (! dlopen(optarg, RTLD_NOW)) {
@@ -184,12 +186,15 @@ int main(int argc, char *argv[]) {
 	case 'V':
 	    verify_sig = optarg;
 	    break;
+	case 'w':
+	    sleepatexit = true;
+	    break;
 	case '?':
 	default:
 	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
 		    "[-N bufsize] [-S string-to-sign] [-o object] "
 		    "[-v data-file] [-V sig-file] [-L library-to-dlopen] "
-		    "[pkcs11_library]\n", argv[0]);
+		    "[-w] [pkcs11_library]\n", argv[0]);
 	    exit(1);
 	}
     }
@@ -750,6 +755,27 @@ int main(int argc, char *argv[]) {
 cleanup:
     if (p11p) p11p->C_Finalize(0);
 
+    if (sleepatexit) {
+	sigset_t set, oset;
+	int sig;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGINT);
+	sigprocmask(SIG_BLOCK, &set, &oset);
+
+	printf("Sleeping (pid %d) ... hit Control-C (INT) to exit ...",
+	       getpid());
+	fflush(stdout);
+
+	if (sigwait(&set, &sig)) {
+	    fprintf(stderr, "sigwait() failed: %s\n", strerror(errno));
+	    exit(1);
+	}
+
+	sigprocmask(SIG_SETMASK, &oset, NULL);
+
+	printf("done\n");
+    }
 
     return 0;
 }
