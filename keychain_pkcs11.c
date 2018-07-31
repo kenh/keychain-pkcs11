@@ -2000,10 +2000,6 @@ do { \
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
-		d = SecCertificateCopyNormalizedSubjectSequence(cert);
-		ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(d),
-			      CFDataGetLength(d));
-		CFRelease(d);
 		d = SecCertificateCopyNormalizedIssuerSequence(cert);
 		ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
@@ -2067,9 +2063,11 @@ obj_free(struct obj_info *obj, unsigned int count)
 {
 	int i, j;
 
-	for (i = 0; i < count; i++)
+	for (i = 0; i < count; i++) {
 		for (j = 0; j < obj[i].attr_count; j++)
 			free(obj[i].attrs[j].pValue);
+		free(obj[i].attrs);
+	}
 
 	free(obj);
 }
