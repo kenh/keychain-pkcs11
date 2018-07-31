@@ -250,7 +250,7 @@ static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 static char *getstrcopy(CFStringRef);
 static bool prefkey_found(const char *, const char *);
 #ifdef KEYCHAIN_DEBUG
-static void dumpdict(const char *, CFDictionaryRef);
+void dumpdict(const char *, CFDictionaryRef);
 #endif /* KEYCHAIN_DEBUG */
 
 /*
@@ -1801,7 +1801,7 @@ logtype(const char *string, CFTypeRef ref)
  * Dump the contents of a dictionary
  */
 
-static void
+void
 dumpdict(const char *string, CFDictionaryRef dict)
 {
 	unsigned int i, count = CFDictionaryGetCount(dict);
