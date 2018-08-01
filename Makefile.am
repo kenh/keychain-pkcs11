@@ -19,6 +19,8 @@ keychain_pkcs11_la_SOURCES = \
 			debug.h \
 			tables.c \
 			tables.h \
+			localauth.m \
+			localauth.h \
 			mypkcs11.h \
 			pkcs11.h \
 			pkcs11f.h \
@@ -31,6 +33,7 @@ keychain_pkcs11_la_LDFLAGS = \
 			-avoid-version \
 			-export-symbols-regex '^C_' \
 			-framework Security \
+			-framework LocalAuthentication \
 			#
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h

@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #include "mypkcs11.h"
+#include "localauth.h"
 #include "debug.h"
 #include "tables.h"
 #include "config.h"
@@ -132,6 +133,7 @@ struct id_info {
 	SecKeyRef		privkey;
 	SecKeyRef		pubkey;
 	CK_KEY_TYPE		keytype;
+	void *			lacontext;
 	char *			label;
 	bool			privcansign;
 	bool			privcandecrypt;
@@ -1615,6 +1617,7 @@ add_identity(CFDictionaryRef dict)
 	id_list[i].privkey = NULL;
 	id_list[i].pubkey = NULL;
 	id_list[i].label = NULL;
+	id_list[i].lacontext = NULL;
 
 	/*
 	 * Extract out of the dictionary all of the things we need.
@@ -1697,6 +1700,8 @@ add_identity(CFDictionaryRef dict)
 		CFRelease(keydict);
 	}
 
+	id_list[i].lacontext = lacontext_new();
+
 	if (ret)
 		return -1;
 
@@ -1733,6 +1738,8 @@ id_list_free(void)
 			CFRelease(id_list[i].pubkey);
 		if (id_list[i].cert)
 			CFRelease(id_list[i].cert);
+		if (id_list[i].lacontext)
+			lacontext_free(id_list[i].lacontext);
 	}
 
 	if (id_list)
