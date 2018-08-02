@@ -8,5 +8,6 @@
 
 void *lacontext_new(void);
 void lacontext_free(void *);
+bool lacontext_auth(void *, unsigned char *, size_t, void *);
 
 #endif /* __LOCALAUTH_H__ */

@@ -5,6 +5,8 @@
 
 #import <LocalAuthentication/LocalAuthentication.h>
 
+#include <os/log.h>
+
 #include "localauth.h"
 
 /*
@@ -33,4 +35,42 @@ lacontext_free(void *l)
 	LAContext *lac = (LAContext *) l;
 
 	[lac release];
+}
+
+bool
+lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
+{
+	LAContext *lac = (LAContext *) l;
+	NSData *password = [NSData dataWithBytes:bytes length: len];
+	SecAccessControlRef secaccess = sec;
+	__block BOOL b;
+	__block NSError *e_ref = NULL;
+	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+
+	b = [lac setCredential: password
+				type: -3];
+
+	[password release];
+
+	if (b != TRUE)
+		return false;
+
+#if 0
+	lac.interactionNotAllowed = TRUE;
+#endif
+
+	[lac evaluateAccessControl: secaccess
+			operation: LAAccessControlOperationUseKeySign
+			localizedReason: @"Requesting key access"
+			reply: ^(BOOL success, NSError *err) {
+				b = success;
+				if (! success)
+					e_ref = err;
+				dispatch_semaphore_signal(sema);
+			}];
+
+	dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+	dispatch_release(sema);
+
+	return b == YES ? true : false;
 }
