@@ -427,13 +427,14 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 {
 	FUNCINITCHK(C_GetInfo);
 
-	if (p->flags != 0) {
-		os_log_debug(logsys, "flags is nonzero!");
+	if (! p) {
 		RET(C_GetInfo, CKR_ARGUMENTS_BAD);
 	}
 
 	p->cryptokiVersion.major = CK_MAJOR_VERSION;
 	p->cryptokiVersion.minor = CK_MINOR_VERSION;
+
+	p->flags = 0;
 
 	sprintfpad(p->manufacturerID, sizeof(p->manufacturerID),
 		   "U.S. Naval Research Lab");
