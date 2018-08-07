@@ -192,6 +192,7 @@ static void sess_list_free(void);
 #define CHECKSESSION(session, var) \
 do { \
 	LOCK_MUTEX(sess_mutex); \
+	session--; \
 	if (session > sess_list_count || sess_list[session] == NULL) { \
 		os_log_debug(logsys, "Session handle %lu is invalid, " \
 			     "returning CKR_SESSION_HANDLE_INVALID", session); \
@@ -798,7 +799,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	for (i = 0; i < sess_list_size; i++) {
 		if (sess_list[i] == NULL) {
 			sess_list[i] = sess;
-			*session = i;
+			*session = i + 1;
 			goto out;
 		}
 	}
@@ -816,7 +817,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 
 	sess_list[sess_list_count] = sess;
 
-	*session = sess_list_count++;
+	*session = ++sess_list_count;
 out:
 	UNLOCK_MUTEX(sess_mutex);
 
@@ -862,6 +863,8 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 
 	os_log_debug(logsys, "session = %d, session_info = %p",
 		     (int) session, session_info);
+
+	session--;
 
 	if (session > sess_list_count || sess_list[session] == NULL)
 		RET(C_GetSessionInfo, CKR_SESSION_HANDLE_INVALID);
@@ -940,6 +943,8 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 	CHECKSESSION(session, se);
 
 	LOCK_MUTEX(se->mutex);
+
+	object--;
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
@@ -1067,7 +1072,7 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 						se->obj_search_index++) {
 		if (search_object(&se->obj_list[se->obj_search_index],
 				  se->search_attrs, se->search_attrs_count)) {
-			object[rc++] = se->obj_search_index;
+			object[rc++] = se->obj_search_index + 1;
 			if (rc >= maxcount) {
 				*count = rc;
 				se->obj_search_index++;
@@ -1146,6 +1151,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	object--;
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
@@ -1319,6 +1326,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	key--;
 
 	if (key >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
