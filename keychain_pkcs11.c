@@ -2010,6 +2010,8 @@ do { \
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
+		b = CK_TRUE;
+		ADD_ATTR(CKA_TOKEN, b);
 		d = SecCertificateCopyNormalizedIssuerSequence(cert);
 		ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
@@ -2033,6 +2035,8 @@ do { \
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
+		b = CK_TRUE;
+		ADD_ATTR(CKA_TOKEN, b);
 		b = id_list[i].pubcanencrypt;
 		ADD_ATTR(CKA_ENCRYPT, b);
 		b = id_list[i].pubcanverify;
@@ -2048,6 +2052,8 @@ do { \
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
+		b = CK_TRUE;
+		ADD_ATTR(CKA_TOKEN, b);
 		b = id_list[i].privcandecrypt;
 		ADD_ATTR(CKA_DECRYPT, b);
 		b = id_list[i].privcansign;
