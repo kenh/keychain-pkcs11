@@ -101,6 +101,10 @@ static struct attr_handler keytype_attr = {
     CKA_KEY_TYPE, "Key type", keytype_dump
 };
 
+static struct attr_handler issuer_attr = {
+    CKA_ISSUER, "Certificate issuer", hexify_dump
+};
+
 #if 0
 static struct attr_handler value_attr = {
     CKA_VALUE, "Object value", hexify_dump
@@ -438,7 +442,8 @@ int main(int argc, char *argv[]) {
                 break;
             case CKO_CERTIFICATE:
 		dump_attrs(p11p, hSession, phObject[i], NULL, &ctype_attr,
-			   &id_attr, &value_attr, (void *) NULL);
+			   &id_attr, &value_attr, &subject_attr,
+			   &issuer_attr, (void *) NULL);
                 break;
 	    case CKO_PUBLIC_KEY:
 	    case CKO_PRIVATE_KEY:
