@@ -2012,6 +2012,8 @@ do { \
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
 		ADD_ATTR(CKA_TOKEN, b);
+		ADD_ATTR_SIZE(CKA_LABEL, id_list[i].label,
+			      strlen(id_list[i].label));
 		d = SecCertificateCopyNormalizedIssuerSequence(cert);
 		ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
