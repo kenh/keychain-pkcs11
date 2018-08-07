@@ -150,6 +150,7 @@ static bool have_slot = false;			/* True if we have a slot */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
+static SecAccessControlRef getaccesscontrol(SecKeyRef);
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
@@ -900,7 +901,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	CHECKSESSION(session, se);
 
 	if (pin) {
-		for (i = 0; i < id_list_count; i++) {
+		for (i = 0; i < 1; i++) {
 			if (! lacontext_auth(id_list[i].lacontext, pin,
 					     pinlen, id_list[i].secaccess)) {
 				os_log_debug(logsys, "PIN setting failed!\n");
@@ -1735,6 +1736,7 @@ add_identity(CFDictionaryRef dict)
 	CFRetain(id_list[i].ident);
 #endif
 
+#if 0
 	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrAccessControl,
 				    (const void **) &id_list[i].secaccess)) {
 		os_log_debug(logsys, "Access Control object not found");
@@ -1742,6 +1744,7 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	CFRetain(id_list[i].secaccess);
+#endif
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrKeyType,
 					    (const void **) &keytype)) {
@@ -1766,7 +1769,22 @@ add_identity(CFDictionaryRef dict)
 						&id_list[i].privkey);
 		if (ret)
 			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+		else {
+			if (! (id_list[i].secaccess =
+					getaccesscontrol(id_list[i].privkey)))
+				return -1;
+		}
 	}
+
+#if 0
+	{
+		CFDictionaryRef poop;
+
+		poop = SecKeyCopyAttributes(id_list[i].privkey);
+
+		CFRelease(poop);
+	}
+#endif
 
 	if ( !ret) {
 		ret = SecCertificateCopyPublicKey(id_list[i].cert,
@@ -1795,6 +1813,133 @@ add_identity(CFDictionaryRef dict)
 		return -1;
 
 	return 0;
+}
+
+/*
+ * Get the SecAccessControl object from the identity.
+ *
+ * This is a little subtle; we don't actually want the SecAccessControl
+ * object for the IDENTITY, we want it for the private key (as it turns
+ * out, they are different).  So what we need to do is get the attributes
+ * for the key using SecItemCopyMatching(); the SecAccessControl object
+ * will be in there.
+ */
+
+static SecAccessControlRef
+getaccesscontrol(SecKeyRef key)
+{
+	CFDictionaryRef attrdict;
+	SecAccessControlRef accret;
+#if 0
+	CFDictionaryRef accquery, accresult;
+	CFDataRef label;
+	OSStatus ret;
+
+	/*
+	 * Our keys for our query dictionary for SecItemCopyMaching().
+	 *
+	 * In order:
+	 *
+	 * kSecClass = kSecClassKey
+	 *	This means we're searching for keys (instead of identities
+	 *	or certificates)
+	 * kSecAttrKeyClass = kSecAttrKeyClassPrivate
+	 *	We want to match on the private key
+	 * kSecAttrApplicationLabel
+	 *	This is the "application label" of the key.  We get this
+	 *	from the identity dictionary, and it makes sure we get the
+	 *	private key associated with this identity.
+	 * kSecMatchLimit = kSecMatchLimitOne
+	 *	We only want one match (really, we should only have one
+	 *	match, but let's be safe)
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 *	We want to get all of the attributes so we can find the
+	 *	SecAccessControlRef
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+		kSecAttrKeyClass,
+		kSecAttrApplicationLabel,
+#define ATTR_LABEL_INDEX 2
+		kSecMatchLimit,
+		kSecReturnAttributes,
+	};
+
+	const void *values[] = {
+		kSecClassKey,		/* kSecClass */
+		kSecAttrKeyClassPrivate,/* kSecAttrKeyClass */
+		NULL,			/* Application Label, fill in later */
+		kSecMatchLimitOne,	/* kSecMatchLimit */
+		kCFBooleanTrue,		/* kSecReturnAttributes */
+	};
+
+	/*
+	 * Build our query dictionary to retrieve the key attributes.  We
+	 * need the application label from the original identity (this is
+	 * passed down in "dict")
+	 */
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrApplicationLabel,
+				    (const void **) &label)) {
+		os_log_debug(logsys, "Application Label object not found");
+		return NULL;
+	}
+
+	values[ATTR_LABEL_INDEX] = label;
+
+	accquery = CFDictionaryCreate(NULL, keys, values,
+				      sizeof(keys)/sizeof(keys[0]),
+				      &kCFTypeDictionaryKeyCallBacks,
+				      &kCFTypeDictionaryValueCallBacks);
+
+	if (accquery == NULL) {
+		os_log_debug(logsys, "Access control ref query dictionary "
+			     "creation returned NULL");
+		return NULL;
+	}
+
+	/*
+	 * Perform the actual query
+	 */
+
+	ret = SecItemCopyMatching(accquery, (CFTypeRef *) &accresult);
+
+	CFRelease(accquery);
+
+	if (ret) {
+		LOG_SEC_ERR("Access control ref SecItemCopyMatching "
+			    "failed: %@", ret);
+		return NULL;
+	}
+
+	/*
+	 * Just in case, make sure we got a CFDictionaryRef
+	 */
+
+	if (CFGetTypeID(accresult) != CFDictionaryGetTypeID()) {
+		logtype("Was expecting a CFDictionary, but got: ", accresult);
+		CFRelease(accresult);
+		return NULL;
+	}
+#endif
+
+	if (! (attrdict = SecKeyCopyAttributes(key))) {
+		os_log_debug(logsys, "Unable to get key attributes");
+		return NULL;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(attrdict, kSecAttrAccessControl,
+					    (const void **) &accret)) {
+		os_log_debug(logsys, "Access Control object not found");
+		CFRelease(attrdict);
+		return NULL;
+	}
+
+	CFRetain(accret);
+	CFRelease(attrdict);
+
+	return accret;
 }
 
 /*

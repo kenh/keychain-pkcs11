@@ -48,6 +48,9 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
 	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 
 	b = [lac setCredential: password
+#if 0
+				type: LACredentialTypeApplicationPassword];
+#endif
 				type: -3];
 
 	[password release];
