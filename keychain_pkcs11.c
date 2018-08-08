@@ -412,6 +412,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	id_list_free();
 
+	UNLOCK_MUTEX(sess_mutex);
 	UNLOCK_MUTEX(id_mutex);
 
 	DESTROY_MUTEX(id_mutex);
