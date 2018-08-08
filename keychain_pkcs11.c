@@ -1807,8 +1807,6 @@ add_identity(CFDictionaryRef dict)
 		CFRelease(keydict);
 	}
 
-	id_list[i].lacontext = lacontext_new();
-
 	if (ret)
 		return -1;
 
