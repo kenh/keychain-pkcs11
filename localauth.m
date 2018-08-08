@@ -22,7 +22,7 @@
  *   the Security framework.  This happens in our code in the functions
  *   scan_identities() and add_identity() (in keychain_pkcs11.c)
  * - You need to save the Access Control object for the private key
- *   you want to authenticate to (ou can get this via SecCopyKeyAttributes()
+ *   you want to authenticate to (you can get this via SecCopyKeyAttributes()
  *   and extract that reference from the dictionary using the
  *   kSecAttrAccessControl key).  The identity also has a (different)
  *   access control object, so make sure you get the one associated with
@@ -33,12 +33,12 @@
  *   Why -3?  I HAVE NO GODDAMN IDEA!  THAT IS ABSOLUTELY NOT DOCUMENTED
  *   ANYWHERE.  But that's what you need to do, because if you DON'T do
  *   that it doesn't work.  (How did I figure that out, you ask?  I spent
- *   a lot of time hunched over my keyboard with ssh-keychain.dylib).
- *   Once you set the PIN, you can call the evaluateAccessControl method
- *   (with the access control object you saved earlier) to verify the PIN
- *   and then you can use the various private key functions without having
- *   to re-enter the PIN again with a UI dialog.  This all happens in
- *   lacontext_auth().
+ *   a lot of time hunched over my keyboard with with lldb and
+ *   ssh-keychain.dylib). Once you set the PIN, you can call the
+ *   evaluateAccessControl method with the access control object you
+ *   saved earlier) to verify the PIN and then you can use the various
+ *   private key functions without having to re-enter the PIN again inside
+ *   a UI dialog box.  This all happens in lacontext_auth().
  *
  * Seriously, Apple?  WHAT THE HELL, MAN???!?  I can forgive the whole
  * business with the LAContext and the Access Control object; that's
