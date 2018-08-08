@@ -1481,12 +1481,17 @@ scan_identities(void)
 	 *	documented very well, but I see that the security tool
 	 *	"list-smartcards" command uses this so I feel it's pretty
 	 *	safe to rely on this search key for now.
-	 * kSecReturnRef = kCFBooleanTrue
-	 *	This means return a reference to the identity (SecIdentityRef).
-	 *	If we just specified this it would mean that we'd get one
-	 *	or more SecIdentityRefs in an array, but because we ask for
-	 *	the attributes (see below) the SecIdentityRef ends up in
-	 *	the results dictionary, under the kSecValueRef key.
+	 * kSecReturnPersistentRef = kCFBooleanTrue
+	 *	This means return a "persisistent" reference to the identity
+	 *      (in a CFDataRef).  In earlier versions we would use
+	 *      kSecReturnRef to get the SecIdentityRef, but we need to
+	 *      bind a LAContext to the identity, and we do that by
+	 *      using the persistent ref to retrieve the ACTUAL SecIdentityRef
+	 *      and feeding in the LAContext into that query by using
+	 *	kSecUseAUthenticationContext.  That actually happens later
+	 *	in add_identity().  See comments in localauth.m for more
+	 *	information.  The persistent ref ends up in the dictionary
+	 *	under the kSecAttrPersistentRef.
 	 * kSecReturnAttributes = kCFBooleanTrue
 	 *	This means we return all of the attributes for each identity.
 	 *	We can use this to get access to things like the label
@@ -1601,7 +1606,7 @@ out:
 
 /*
  * Add an identity to our identity list.  Takes a CFDictionaryRef with
- * all of the identity attributes in it
+ * all of the identity attributes (and persistent reference) in it.
  */
 
 static int
@@ -1659,6 +1664,13 @@ add_identity(CFDictionaryRef dict)
 		os_log_debug(logsys, "Persistent id reference not found");
 		return -1;
 	}
+
+	/*
+	 * Get a new LAContext and feed it into the query using the
+	 * kSecUseAuthenticationContext key.  We also feed in the persistent
+	 * reference to extract the REAL identity reference (SecIdentityRef).
+	 * This will attach the LAContext to the identity.
+	 */
 
 	id_list[i].lacontext = lacontext_new();
 
