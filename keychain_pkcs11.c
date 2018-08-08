@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #include "mypkcs11.h"
+#include "localauth.h"
 #include "debug.h"
 #include "tables.h"
 #include "config.h"
@@ -132,6 +133,8 @@ struct id_info {
 	SecKeyRef		privkey;
 	SecKeyRef		pubkey;
 	CK_KEY_TYPE		keytype;
+	void *			lacontext;
+	SecAccessControlRef	secaccess;
 	char *			label;
 	bool			privcansign;
 	bool			privcandecrypt;
@@ -147,6 +150,7 @@ static bool have_slot = false;			/* True if we have a slot */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
+static SecAccessControlRef getaccesscontrol(SecKeyRef);
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
@@ -893,6 +897,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	      CK_UTF8CHAR_PTR pin, CK_ULONG pinlen)
 {
 	struct session *se;
+	int i;
 	FUNCINITCHK(C_Login);
 
 	os_log_debug(logsys, "session = %d, user_type = %lu, pin = %s, "
@@ -900,9 +905,16 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 
 	CHECKSESSION(session, se);
 
-	if (pin)
+	if (pin) {
+		for (i = 0; i < 1; i++) {
+			if (! lacontext_auth(id_list[i].lacontext, pin,
+					     pinlen, id_list[i].secaccess)) {
+				os_log_debug(logsys, "PIN setting failed!\n");
+			}
+		}
 		os_log_debug(logsys, "PIN was set, but it shouldn't have "
 			     "been, but we are ignoring that for now");
+	}
 
 	RET(C_Login, CKR_OK);
 }
@@ -1483,12 +1495,17 @@ scan_identities(void)
 	 *	documented very well, but I see that the security tool
 	 *	"list-smartcards" command uses this so I feel it's pretty
 	 *	safe to rely on this search key for now.
-	 * kSecReturnRef = kCFBooleanTrue
-	 *	This means return a reference to the identity (SecIdentityRef).
-	 *	If we just specified this it would mean that we'd get one
-	 *	or more SecIdentityRefs in an array, but because we ask for
-	 *	the attributes (see below) the SecIdentityRef ends up in
-	 *	the results dictionary, under the kSecValueRef key.
+	 * kSecReturnPersistentRef = kCFBooleanTrue
+	 *	This means return a "persisistent" reference to the identity
+	 *      (in a CFDataRef).  In earlier versions we would use
+	 *      kSecReturnRef to get the SecIdentityRef, but we need to
+	 *      bind a LAContext to the identity, and we do that by
+	 *      using the persistent ref to retrieve the ACTUAL SecIdentityRef
+	 *      and feeding in the LAContext into that query by using
+	 *	kSecUseAUthenticationContext.  That actually happens later
+	 *	in add_identity().  See comments in localauth.m for more
+	 *	information.  The persistent ref ends up in the dictionary
+	 *	under the kSecAttrPersistentRef.
 	 * kSecReturnAttributes = kCFBooleanTrue
 	 *	This means we return all of the attributes for each identity.
 	 *	We can use this to get access to things like the label
@@ -1507,14 +1524,14 @@ scan_identities(void)
 		kSecClass,
 		kSecMatchLimit,
 		kSecAttrAccessGroup,
-		kSecReturnRef,
+		kSecReturnPersistentRef,
 		kSecReturnAttributes,
 	};
 	const void *values[] = {
 		kSecClassIdentity,		/* kSecClass */
 		kSecMatchLimitAll,		/* kSecMatchLimit */
 		kSecAttrAccessGroupToken,	/* kSecAttrAccessGroup */
-		kCFBooleanTrue,			/* kSecReturnRef */
+		kCFBooleanTrue,			/* kSecReturnPersistentRef */
 		kCFBooleanTrue,			/* kSecReturnAttributes */
 	};
 
@@ -1603,7 +1620,7 @@ out:
 
 /*
  * Add an identity to our identity list.  Takes a CFDictionaryRef with
- * all of the identity attributes in it
+ * all of the identity attributes (and persistent reference) in it.
  */
 
 static int
@@ -1611,9 +1628,33 @@ add_identity(CFDictionaryRef dict)
 {
 	CFStringRef label;
 	CFNumberRef keytype;
-	CFDictionaryRef keydict;
+	CFTypeRef refresult;
+	CFDictionaryRef refquery, keydict;
+	CFDataRef p_ref;
 	OSStatus ret;
 	int i = id_list_count;
+
+	/*
+	 * Our query dictionary for SecItemCopyMatching
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+		kSecMatchLimit,
+		kSecReturnRef,
+		kSecUseAuthenticationContext,
+#define AUTHC_INDEX	3
+		kSecAttrPersistentReference,
+#define P_REF_INDEX	4
+	};
+
+	const void *values[] = {
+		kSecClassIdentity,		/* kSecClass */
+		kSecMatchLimitOne,		/* kSecMatchLimit */
+		kCFBooleanTrue,			/* kSecReturnRef */
+		NULL,				/* UseAuthtenticationContext */
+		NULL,				/* PersistentReference */
+	};
 
 	/*
 	 * If we don't have enough id entries, allocate some more.
@@ -1629,6 +1670,60 @@ add_identity(CFDictionaryRef dict)
 	id_list[i].privkey = NULL;
 	id_list[i].pubkey = NULL;
 	id_list[i].label = NULL;
+	id_list[i].lacontext = NULL;
+	id_list[i].secaccess = NULL;
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
+					    (const void **)&p_ref)) {
+		os_log_debug(logsys, "Persistent id reference not found");
+		return -1;
+	}
+
+	/*
+	 * Get a new LAContext and feed it into the query using the
+	 * kSecUseAuthenticationContext key.  We also feed in the persistent
+	 * reference to extract the REAL identity reference (SecIdentityRef).
+	 * This will attach the LAContext to the identity.
+	 */
+
+	id_list[i].lacontext = lacontext_new();
+
+	values[AUTHC_INDEX] = id_list[i].lacontext;
+	values[P_REF_INDEX] = p_ref;
+
+	refquery = CFDictionaryCreate(NULL, keys, values,
+				      sizeof(keys)/sizeof(keys[0]),
+				      &kCFTypeDictionaryKeyCallBacks,
+				      &kCFTypeDictionaryValueCallBacks);
+
+	if (refquery == NULL) {
+		os_log_debug(logsys, "Persistent ref query dictionary "
+			     "creation returned NULL");
+		return -1;
+	}
+
+	ret = SecItemCopyMatching(refquery, &refresult);
+
+	CFRelease(refquery);
+
+	if (ret) {
+		LOG_SEC_ERR("Persistent ref SecItemCopyMatching "
+			    "failed: %@", ret);
+		return -1;
+	}
+
+	if (CFGetTypeID(refresult) != SecIdentityGetTypeID()) {
+		logtype("Was expecting a SecIdentityRef, but got: ", refresult);
+		CFRelease(refresult);
+		return -1;
+	}
+
+	/*
+	 * No need to retain; we own this as a result of it coming out of
+	 * SecItemCopyMatching
+	 */
+
+	id_list[i].ident = (SecIdentityRef) refresult;
 
 	/*
 	 * Extract out of the dictionary all of the things we need.
@@ -1656,7 +1751,8 @@ add_identity(CFDictionaryRef dict)
 		id_list[i].label = strdup("Hardware token");
 		os_log_debug(logsys, "No label, using default");
 	}
-
+	
+#if 0
 	if (! CFDictionaryGetValueIfPresent(dict, kSecValueRef,
 					    (const void **)&id_list[i].ident)) {
 		os_log_debug(logsys, "Identity reference not found");
@@ -1664,6 +1760,17 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	CFRetain(id_list[i].ident);
+#endif
+
+#if 0
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrAccessControl,
+				    (const void **) &id_list[i].secaccess)) {
+		os_log_debug(logsys, "Access Control object not found");
+		return -1;
+	}
+
+	CFRetain(id_list[i].secaccess);
+#endif
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrKeyType,
 					    (const void **) &keytype)) {
@@ -1688,7 +1795,22 @@ add_identity(CFDictionaryRef dict)
 						&id_list[i].privkey);
 		if (ret)
 			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+		else {
+			if (! (id_list[i].secaccess =
+					getaccesscontrol(id_list[i].privkey)))
+				return -1;
+		}
 	}
+
+#if 0
+	{
+		CFDictionaryRef poop;
+
+		poop = SecKeyCopyAttributes(id_list[i].privkey);
+
+		CFRelease(poop);
+	}
+#endif
 
 	if ( !ret) {
 		ret = SecCertificateCopyPublicKey(id_list[i].cert,
@@ -1715,6 +1837,133 @@ add_identity(CFDictionaryRef dict)
 		return -1;
 
 	return 0;
+}
+
+/*
+ * Get the SecAccessControl object from the identity.
+ *
+ * This is a little subtle; we don't actually want the SecAccessControl
+ * object for the IDENTITY, we want it for the private key (as it turns
+ * out, they are different).  So what we need to do is get the attributes
+ * for the key using SecItemCopyMatching(); the SecAccessControl object
+ * will be in there.
+ */
+
+static SecAccessControlRef
+getaccesscontrol(SecKeyRef key)
+{
+	CFDictionaryRef attrdict;
+	SecAccessControlRef accret;
+#if 0
+	CFDictionaryRef accquery, accresult;
+	CFDataRef label;
+	OSStatus ret;
+
+	/*
+	 * Our keys for our query dictionary for SecItemCopyMaching().
+	 *
+	 * In order:
+	 *
+	 * kSecClass = kSecClassKey
+	 *	This means we're searching for keys (instead of identities
+	 *	or certificates)
+	 * kSecAttrKeyClass = kSecAttrKeyClassPrivate
+	 *	We want to match on the private key
+	 * kSecAttrApplicationLabel
+	 *	This is the "application label" of the key.  We get this
+	 *	from the identity dictionary, and it makes sure we get the
+	 *	private key associated with this identity.
+	 * kSecMatchLimit = kSecMatchLimitOne
+	 *	We only want one match (really, we should only have one
+	 *	match, but let's be safe)
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 *	We want to get all of the attributes so we can find the
+	 *	SecAccessControlRef
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+		kSecAttrKeyClass,
+		kSecAttrApplicationLabel,
+#define ATTR_LABEL_INDEX 2
+		kSecMatchLimit,
+		kSecReturnAttributes,
+	};
+
+	const void *values[] = {
+		kSecClassKey,		/* kSecClass */
+		kSecAttrKeyClassPrivate,/* kSecAttrKeyClass */
+		NULL,			/* Application Label, fill in later */
+		kSecMatchLimitOne,	/* kSecMatchLimit */
+		kCFBooleanTrue,		/* kSecReturnAttributes */
+	};
+
+	/*
+	 * Build our query dictionary to retrieve the key attributes.  We
+	 * need the application label from the original identity (this is
+	 * passed down in "dict")
+	 */
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrApplicationLabel,
+				    (const void **) &label)) {
+		os_log_debug(logsys, "Application Label object not found");
+		return NULL;
+	}
+
+	values[ATTR_LABEL_INDEX] = label;
+
+	accquery = CFDictionaryCreate(NULL, keys, values,
+				      sizeof(keys)/sizeof(keys[0]),
+				      &kCFTypeDictionaryKeyCallBacks,
+				      &kCFTypeDictionaryValueCallBacks);
+
+	if (accquery == NULL) {
+		os_log_debug(logsys, "Access control ref query dictionary "
+			     "creation returned NULL");
+		return NULL;
+	}
+
+	/*
+	 * Perform the actual query
+	 */
+
+	ret = SecItemCopyMatching(accquery, (CFTypeRef *) &accresult);
+
+	CFRelease(accquery);
+
+	if (ret) {
+		LOG_SEC_ERR("Access control ref SecItemCopyMatching "
+			    "failed: %@", ret);
+		return NULL;
+	}
+
+	/*
+	 * Just in case, make sure we got a CFDictionaryRef
+	 */
+
+	if (CFGetTypeID(accresult) != CFDictionaryGetTypeID()) {
+		logtype("Was expecting a CFDictionary, but got: ", accresult);
+		CFRelease(accresult);
+		return NULL;
+	}
+#endif
+
+	if (! (attrdict = SecKeyCopyAttributes(key))) {
+		os_log_debug(logsys, "Unable to get key attributes");
+		return NULL;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(attrdict, kSecAttrAccessControl,
+					    (const void **) &accret)) {
+		os_log_debug(logsys, "Access Control object not found");
+		CFRelease(attrdict);
+		return NULL;
+	}
+
+	CFRetain(accret);
+	CFRelease(attrdict);
+
+	return accret;
 }
 
 /*
@@ -1747,6 +1996,10 @@ id_list_free(void)
 			CFRelease(id_list[i].pubkey);
 		if (id_list[i].cert)
 			CFRelease(id_list[i].cert);
+		if (id_list[i].lacontext)
+			lacontext_free(id_list[i].lacontext);
+		if (id_list[i].secaccess)
+			CFRelease(id_list[i].secaccess);
 	}
 
 	if (id_list)

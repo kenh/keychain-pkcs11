@@ -11,6 +11,7 @@ AC_CONFIG_MACRO_DIRS([m4])
 AM_INIT_AUTOMAKE([-Wall foreign subdir-objects 1.12])
 AM_PROG_CC_C_O
 AM_PROG_AR
+AC_PROG_OBJC
 
 LT_PREREQ([2.4.6])
 LT_INIT([disable-static dlopen])
