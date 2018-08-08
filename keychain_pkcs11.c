@@ -947,6 +947,9 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 
 	object--;
 
+	if (se->obj_list_count == 0)
+		build_objects(se);
+
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_GetAttributeValue, CKR_OBJECT_HANDLE_INVALID);
