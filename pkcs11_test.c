@@ -145,6 +145,8 @@ int main(int argc, char *argv[]) {
     CK_SLOT_ID validSlot = -1;
     CK_SLOT_INFO slotInfo;
     CK_OBJECT_HANDLE sObject = -1;
+    CK_ATTRIBUTE_TYPE dumpType = -1;
+    const char *dumpFile = NULL;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
     CK_MECHANISM mech = { sMech, NULL, 0 };
     const char *verify_data = NULL;
@@ -156,8 +158,23 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "L:N:n:o:S:s:v:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:f:L:N:n:o:S:s:v:V:w")) != -1) {
 	switch (i) {
+	case 'a':
+	{
+	    char *endptr;
+
+	    dumpType = strtol(optarg, &endptr, 0);
+
+	    if (*endptr != '\0') {
+		fprintf(stderr, "Invalid numeric attribute type: %s\n", optarg);
+		exit(1);
+	    }
+	}
+	    break;
+	case 'f':
+	    dumpFile = optarg;
+	    break;
 	case 'L':
 	    if (! dlopen(optarg, RTLD_NOW)) {
 		fprintf(stderr, "Unable to open %s: %s\n", optarg, dlerror());
@@ -195,16 +212,30 @@ int main(int argc, char *argv[]) {
 	    break;
 	case '?':
 	default:
-	    fprintf(stderr, "Usage: %s [-s slotnumber] [-n progname] "
-		    "[-N bufsize] [-S string-to-sign] [-o object] "
-		    "[-v data-file] [-V sig-file] [-L library-to-dlopen] "
-		    "[-w] [pkcs11_library]\n", argv[0]);
+	    fprintf(stderr, "Usage: %s\n"
+		    "\t\t[-a attribute number]\n"
+		    "\t\t[-f dump file]\n"
+		    "\t\t[-s slotnumber]\n"
+		    "\t\t[-n progname]\n"
+		    "\t\t[-N bufsize]\n"
+		    "\t\t[-S string-to-sign]\n"
+		    "\t\t[-o object]\n"
+		    "\t\t[-v data-file]\n"
+		    "\t\t[-V sig-file]\n"
+		    "\t\t[-L library-to-dlopen]\n"
+		    "\t\t[-w]\n"
+		    "\t\tpkcs11_library\n", argv[0]);
 	    exit(1);
 	}
     }
 
     if ((verify_data || verify_sig) && (!verify_data || !verify_sig)) {
 	fprintf(stderr, "Both -v and -V must be given\n");
+	exit(1);
+    }
+
+    if (dumpType != -1 && (! dumpFile || sObject == -1)) {
+	fprintf(stderr, "When using -a, -o and -f must be given\n");
 	exit(1);
     }
 
@@ -393,6 +424,48 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to get session info (rv = %s)\n", getCKRName(rv));
     }
 
+    if (dumpType != -1) {
+	FILE *out;
+	attrs[0].type = dumpType;
+	attrs[0].pValue = NULL;
+	attrs[0].ulValueLen = 0;
+
+	rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
+
+	if (rv != CKR_OK && rv != CKR_BUFFER_TOO_SMALL) {
+	    fprintf(stderr, "C_GetAttributeValue dump for attribute %lu (%s) "
+		    "failed (rv = %s)\n", dumpType, getCKAName(dumpType),
+		    getCKRName(rv));
+	    exit(1);
+	}
+
+	attrs[0].pValue = malloc(attrs[0].ulValueLen);
+
+	rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "2nd call to C_GetAttributeValue failed "
+		   "(rv = %s)\n", getCKRName(rv));
+	    exit(1);
+	}
+
+	out = fopen(dumpFile, "w");
+
+	if (! out) {
+	    fprintf(stderr, "Unable to open \"%s\": %s\n", dumpFile,
+		    strerror(errno));
+	    exit(1);
+	}
+
+	printf("Writing %lu bytes to \"%s\" for attribute %lx (%s)\n",
+	       attrs[0].ulValueLen, dumpFile, dumpType, getCKAName(dumpType));
+
+	fwrite(attrs[0].pValue, attrs[0].ulValueLen, 1, out);
+
+	fclose(out);
+	free(attrs[0].pValue);
+	exit(0);
+    }
 
     rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
     if (rv != CKR_OK) {
