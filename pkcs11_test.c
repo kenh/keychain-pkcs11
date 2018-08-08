@@ -424,6 +424,13 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to get session info (rv = %s)\n", getCKRName(rv));
     }
 
+    rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
+    if (rv != CKR_OK) {
+        fprintf(stderr, "Error logging into token (rv = %s)\n", getCKRName(rv));
+        (void)p11p->C_CloseSession(hSession);
+        goto cleanup;
+    }
+
     if (dumpType != -1) {
 	FILE *out;
 	attrs[0].type = dumpType;
@@ -465,13 +472,6 @@ int main(int argc, char *argv[]) {
 	fclose(out);
 	free(attrs[0].pValue);
 	exit(0);
-    }
-
-    rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
-    if (rv != CKR_OK) {
-        fprintf(stderr, "Error logging into token (rv = %s)\n", getCKRName(rv));
-        (void)p11p->C_CloseSession(hSession);
-        goto cleanup;
     }
 
 
