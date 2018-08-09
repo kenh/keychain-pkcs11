@@ -64,6 +64,7 @@
 
 #include <os/log.h>
 
+#include "mypkcs11.h"
 #include "localauth.h"
 
 /*
@@ -94,7 +95,8 @@ lacontext_free(void *l)
 	[lac release];
 }
 
-bool
+
+CK_RV
 lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
 {
 	LAContext *lac = (LAContext *) l;
@@ -102,7 +104,7 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
 	SecAccessControlRef secaccess = sec;
 	__block BOOL b;
 	__block NSError *e_ref = NULL;
-	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+	dispatch_semaphore_t sema;
 
 	b = [lac setCredential: password
 #if 0
@@ -112,25 +114,58 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
 
 	[password release];
 
-	if (b != TRUE)
-		return false;
+	if (b != TRUE) {
+		/*
+		 * Not sure what the correct error to use here is
+		 */
+		os_log_debug(logsys, "LAContext setCredential failed!");
+		return CKR_GENERAL_ERROR;
+	}
 
 #if 0
 	lac.interactionNotAllowed = TRUE;
 #endif
+	sema = dispatch_semaphore_create(0);
 
 	[lac evaluateAccessControl: secaccess
 			operation: LAAccessControlOperationUseKeySign
 			localizedReason: @"Requesting key access"
 			reply: ^(BOOL success, NSError *err) {
 				b = success;
-				if (! success)
+				if (! success) {
+					/*
+					 * It seems the error argument
+					 * gets released after this block
+					 * is complete, so retain it so
+					 * we can still use it
+					 */
 					e_ref = err;
+					[e_ref retain];
+				}
 				dispatch_semaphore_signal(sema);
 			}];
 
 	dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
 	dispatch_release(sema);
 
-	return b == YES ? true : false;
+	if (b != YES) {
+		os_log_debug(logsys, "evaluateAccessControl failed: %d "
+			     "%{public}@", (int) e_ref.code, e_ref);
+		[e_ref release];
+		return CKR_PIN_INCORRECT;
+	}
+
+	return CKR_OK;
+}
+
+void
+lacontext_logout(void *l)
+{
+	LAContext *lac = (LAContext *) l;
+	BOOL b;
+
+	b = [lac setCredential: NULL type: -3];
+
+	if (b != YES)
+		os_log_debug(logsys, "WARNING: unable to logout of credential");
 }

@@ -147,6 +147,7 @@ static unsigned int id_list_count = 0;		/* Number of valid entries */
 static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
 static bool id_list_init = false;
 static bool have_slot = false;			/* True if we have a slot */
+static bool ask_pin = false;			/* Should we ask for a PIN? */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
@@ -268,7 +269,7 @@ void dumpdict(const char *, CFDictionaryRef);
  */
 
 static void log_init(void *);
-static os_log_t logsys;
+os_log_t logsys;
 static dispatch_once_t loginit;
 
 /*
@@ -354,9 +355,14 @@ CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR pPtr)
  * These are in PKCS11 order, to make searching easier
  */
 
+/*
+ * Initialize the library and setup anything we need.
+ */
+
 CK_RV C_Initialize(CK_VOID_PTR p)
 {
 	CK_C_INITIALIZE_ARGS_PTR init = (CK_C_INITIALIZE_ARGS_PTR) p;
+	const char *progname;
 
 	FUNCINIT(C_Initialize);
 
@@ -392,6 +398,33 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 
 	CREATE_MUTEX(id_mutex);
 	CREATE_MUTEX(sess_mutex);
+
+	/*
+	 * By default we let the Security framework pop up a dialog box
+	 * when the PIN is needed, and we will set
+	 * CKF_PROTECTED_AUTHENTICATION_PATH in the token information
+	 * structure to indicate that the application should NOT prompt
+	 * for a PIN.  But some programs are buggy, so let's make it
+	 * configurable.  Check to see if the current program name exists
+	 * in the "askPIN" preference in our configuration domain (currently
+	 * that is "mil.navy.nrl.cmf.pkcs11").  The program name is whatever
+	 * is returned by getprogname().  If that program exists, then we
+	 * will allow the PIN to be set via C_Login().
+	 */
+
+	progname = getprogname();
+
+	if (! prefkey_found("askPIN", progname)) {
+		os_log_debug(logsys, "Program \"%{public}s\" is NOT set to "
+			     "ask for PIN, will let Security ask for the PIN",
+			     progname);
+		ask_pin = false;
+	} else {
+		os_log_debug(logsys, "Program \"%{public}s\" IS set to ask "
+			     "for a PIN, we will prompt for the PIN",
+			     progname);
+		ask_pin = true;
+	}
 
 	initialized = 1;
 
@@ -577,8 +610,6 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 {
-	const char *progname;
-
 	FUNCINITCHK(C_GetTokenInfo);
 
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
@@ -638,25 +669,20 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
 			    CKF_USER_PIN_INITIALIZED |
 			    CKF_TOKEN_INITIALIZED;
-	/*
-	 * Some programs don't work so well if we set
-	 * CKF_PROTECTED_AUTHENTICATION_PATH, so let's make it so it's
-	 * controllable.  If we find the program name (as returned by
-	 * getprogname() in the special "askPIN" key in our preference
-	 * domain, then don't set it; otherwise, DO set it.
+
+	/* 
+	 * If we were set to to NOT ask for a PIN in C_Login (see
+	 * the function C_Initialize for more info) then set the flag
+	 * CKF_PROTECTED_AUTHENTICATION_PATH.
 	 */
 
-	progname = getprogname();
-
-	if (! prefkey_found("askPIN", progname)) {
-		os_log_debug(logsys, "Program \"%{public}s\" is NOT set to "
-			     "ask for PIN, setting "
-			     "PROTECTED_AUTHENTICATION_PATH", progname);
-		token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
+	if (ask_pin) {
+		os_log_debug(logsys, "We are NOT setting the flag "
+			     "CKF_PROTECTED_AUTHENTICATION_PATH");
 	} else {
-		os_log_debug(logsys, "Program \"%{public}s\" is set to ask "
-			     "for a PIN, NOT setting "
-			     "PROTECTED_AUTHENTICATION_PATH", progname);
+		os_log_debug(logsys, "We ARE setting the flag "
+			     "CKF_PROTECTED_AUTHENTICATION_PATH");
+		token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
 	}
 
 	token_info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
@@ -889,8 +915,8 @@ NOTSUPPORTED(C_GetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstat
 NOTSUPPORTED(C_SetOperationState, (CK_SESSION_HANDLE session, CK_BYTE_PTR opstate, CK_ULONG opstatelen, CK_OBJECT_HANDLE enckey, CK_OBJECT_HANDLE authkey))
 
 /*
- * Login to token.  Right now is a no-op, because should be handled by
- * pop-up dialog.
+ * Login to token.  If we actually get passed a PIN here, feed it into the
+ * LAContext methods in localauth.m.
  */
 
 CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
@@ -898,35 +924,76 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 {
 	struct session *se;
 	int i;
+	CK_RV rv = CKR_OK;
 	FUNCINITCHK(C_Login);
 
-	os_log_debug(logsys, "session = %d, user_type = %lu, pin = %s, "
-		     "pinlen = %lu", (int) session, usertype, pin, pinlen);
+	os_log_debug(logsys, "session = %d, user_type = %lu", (int) session,
+		     usertype);
 
 	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * I went back and forth here; I finally decided that if a PIN
+	 * was passed into this function then we should set it.  We
+	 * use the sme PIN for all private keys; that seems a safe assumption
+	 * for now
+	 */
+
 	if (pin) {
-		for (i = 0; i < 1; i++) {
-			if (! lacontext_auth(id_list[i].lacontext, pin,
-					     pinlen, id_list[i].secaccess)) {
-				os_log_debug(logsys, "PIN setting failed!\n");
+		for (i = 0; i < id_list_count; i++) {
+			os_log_debug(logsys, "Setting PIN for identity %d", i);
+			if ((rv = lacontext_auth(id_list[i].lacontext, pin,
+						 pinlen,
+						 id_list[i].secaccess)) != CKR_OK) {
+				/*
+				 * The real error should have been logged
+				 * in lacontext_auth().
+				 */
+				goto out;
 			}
 		}
-		os_log_debug(logsys, "PIN was set, but it shouldn't have "
-			     "been, but we are ignoring that for now");
+	} else {
+		os_log_debug(logsys, "We are NOT setting the PIN");
 	}
 
-	RET(C_Login, CKR_OK);
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_Login, rv);
 }
+
+/*
+ * If we set a null password, then that will remove our existing credentials.
+ */
 
 CK_RV C_Logout(CK_SESSION_HANDLE session)
 {
-	FUNCINITCHK(C_Login);
+	struct session *se;
+	int i;
+	FUNCINITCHK(C_Logout);
 
 	os_log_debug(logsys, "session = %d", (int) session);
 
-	/* Right now a no-op */
+	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * Log out from all identities
+	 */
+
+	for (i = 0; i < id_list_count; i++) {
+		os_log_debug(logsys, "Logging out of identity %d", i);
+		lacontext_logout(id_list[i].lacontext);
+	}
+
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
 	RET(C_Logout, CKR_OK);
 }
 
