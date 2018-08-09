@@ -120,7 +120,7 @@ the Console application or the `log` command.  To see the debug log output
 using `log`, run:
 
 ```
-% log log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
+% log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
 ```
 
 This will produce a lot of output, so you may want to redirect this to a file.
