@@ -944,10 +944,17 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 
 	if (pin) {
 		for (i = 0; i < id_list_count; i++) {
+			enum la_keyusage usage;
+
 			os_log_debug(logsys, "Setting PIN for identity %d", i);
+
+			usage = id_list[i].privcansign ? USAGE_SIGN :
+								USAGE_DECRYPT;
+
 			if ((rv = lacontext_auth(id_list[i].lacontext, pin,
 						 pinlen,
-						 id_list[i].secaccess)) != CKR_OK) {
+						 id_list[i].secaccess,
+						 usage)) != CKR_OK) {
 				/*
 				 * The real error should have been logged
 				 * in lacontext_auth().

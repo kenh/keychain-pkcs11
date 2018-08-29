@@ -97,11 +97,13 @@ lacontext_free(void *l)
 
 
 CK_RV
-lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
+lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec,
+	       enum la_keyusage usage)
 {
 	LAContext *lac = (LAContext *) l;
 	NSData *password = [NSData dataWithBytes:bytes length: len];
 	SecAccessControlRef secaccess = sec;
+	LAAccessControlOperation acc_control;
 	__block BOOL b;
 	__block NSError *e_ref = NULL;
 	dispatch_semaphore_t sema;
@@ -122,13 +124,22 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec)
 		return CKR_GENERAL_ERROR;
 	}
 
+	switch (usage) {
+	case USAGE_SIGN:
+		acc_control = LAAccessControlOperationUseKeySign;
+		break;
+	case USAGE_DECRYPT:
+		acc_control = LAAccessControlOperationUseKeyDecrypt;
+		break;
+	}
+
 #if 0
 	lac.interactionNotAllowed = TRUE;
 #endif
 	sema = dispatch_semaphore_create(0);
 
 	[lac evaluateAccessControl: secaccess
-			operation: LAAccessControlOperationUseKeySign
+			operation: acc_control
 			localizedReason: @"Requesting key access"
 			reply: ^(BOOL success, NSError *err) {
 				b = success;
