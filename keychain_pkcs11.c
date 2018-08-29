@@ -151,7 +151,7 @@ static bool ask_pin = false;			/* Should we ask for a PIN? */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
-static SecAccessControlRef getaccesscontrol(SecKeyRef);
+static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
@@ -1902,7 +1902,7 @@ add_identity(CFDictionaryRef dict)
 			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
 		else {
 			if (! (id_list[i].secaccess =
-					getaccesscontrol(id_list[i].privkey)))
+					getaccesscontrol(dict)))
 				return -1;
 		}
 	}
@@ -1945,12 +1945,10 @@ add_identity(CFDictionaryRef dict)
  */
 
 static SecAccessControlRef
-getaccesscontrol(SecKeyRef key)
+getaccesscontrol(CFDictionaryRef dict)
 {
-	CFDictionaryRef attrdict;
 	SecAccessControlRef accret;
-#if 0
-	CFDictionaryRef accquery, accresult;
+	CFDictionaryRef accquery, attrdict;
 	CFDataRef label;
 	OSStatus ret;
 
@@ -2022,7 +2020,7 @@ getaccesscontrol(SecKeyRef key)
 	 * Perform the actual query
 	 */
 
-	ret = SecItemCopyMatching(accquery, (CFTypeRef *) &accresult);
+	ret = SecItemCopyMatching(accquery, (CFTypeRef *) &attrdict);
 
 	CFRelease(accquery);
 
@@ -2036,22 +2034,9 @@ getaccesscontrol(SecKeyRef key)
 	 * Just in case, make sure we got a CFDictionaryRef
 	 */
 
-	if (CFGetTypeID(accresult) != CFDictionaryGetTypeID()) {
-		logtype("Was expecting a CFDictionary, but got: ", accresult);
-		CFRelease(accresult);
-		return NULL;
-	}
-#endif
-
-	/*
-	 * I know; I lied.  SecKeyCopyAttributes() returns the same
-	 * information and is shorter.  Technically the access control
-	 * object SHOULDN'T be in there; we might need to switch back to
-	 * using the other code later.
-	 */
-
-	if (! (attrdict = SecKeyCopyAttributes(key))) {
-		os_log_debug(logsys, "Unable to get key attributes");
+	if (CFGetTypeID(attrdict) != CFDictionaryGetTypeID()) {
+		logtype("Was expecting a CFDictionary, but got: ", attrdict);
+		CFRelease(attrdict);
 		return NULL;
 	}
 
