@@ -1572,7 +1572,7 @@ scan_identities(void)
 	 *	kSecUseAUthenticationContext.  That actually happens later
 	 *	in add_identity().  See comments in localauth.m for more
 	 *	information.  The persistent ref ends up in the dictionary
-	 *	under the kSecAttrPersistentRef.
+	 *	under the kSecValuePersistentRef.
 	 * kSecReturnAttributes = kCFBooleanTrue
 	 *	This means we return all of the attributes for each identity.
 	 *	We can use this to get access to things like the label
@@ -1702,7 +1702,45 @@ add_identity(CFDictionaryRef dict)
 	int i = id_list_count;
 
 	/*
-	 * Our query dictionary for SecItemCopyMatching
+	 * Our query dictionary for SecItemCopyMatching.  Here are the
+	 * components of our query dictionary:
+	 *
+	 * kSecClass = kSecClassIdentity
+	 *	See scan_identities() for more details, but this limits us to
+	 *	only retrieving identities.
+	 * kSecMatchLimit = kSecMatchLimitOne
+	 *	Because we're using the persistent reference (see below)
+	 *	we really only want one response (and we should only get one)
+	 *	so set the match limit to one so we only get back a single
+	 *	response.
+	 * kSecReturnRef = kCFBooleanTrue
+	 *	We set this to indicate that we want an identity reference
+	 *	back (SecIdentityRef); this should be the only thing returned
+	 *	because we set no other return keys and we are requesting
+	 *	only one.
+	 * kSecUseAuthenticationContext = LAContext
+	 *	This is covered in more detail in localauth.m, but the idea
+	 *	here is this is a Local Authentication context created by
+	 *	the LAContext class.  When converting from a persistent ref
+	 *	to a SecIdentityRef and an auth context is passed in via
+	 *	kSecUseAuthenticationContext, it is converted by the Security
+	 *	framework internally to an ACM context and we can then later
+	 *	use the LAContext methods to authentication to the token.
+	 * kSecValuePersistentRef = persistent reference
+	 *	This is the persistent reference generated in the attribute
+	 *	dictionary when we did the search for all identities in
+	 *	scan_identities().  The reason we get a persistent reference
+	 *	in scan_identities() and then convert it to a "real" reference
+	 *	(e.g., SecIdentityRef) is so we can bind the LAContext
+	 *	to the identity so we have the ability to input the PIN
+	 *	via the PKCS#11 API (rather than let the Security framework
+	 *	ask for it).  It is worth noting that there is ALSO an
+	 *	attribute key called "kSecAttrPersistentReference"; as far
+	 *	as I can tell, that key is not used for anything.  The
+	 *	Apple documentation says to convert a persistent reference
+	 *	to a normal reference you should pass in the persistent
+	 *	reference in a CFArray using the kSecMatchItemList, but
+	 *	I can definitely say that at least for me, this did not work.
 	 */
 
 	const void *keys[] = {
@@ -1711,7 +1749,7 @@ add_identity(CFDictionaryRef dict)
 		kSecReturnRef,
 		kSecUseAuthenticationContext,
 #define AUTHC_INDEX	3
-		kSecAttrPersistentReference,
+		kSecValuePersistentRef,
 #define P_REF_INDEX	4
 	};
 
@@ -1869,16 +1907,6 @@ add_identity(CFDictionaryRef dict)
 		}
 	}
 
-#if 0
-	{
-		CFDictionaryRef poop;
-
-		poop = SecKeyCopyAttributes(id_list[i].privkey);
-
-		CFRelease(poop);
-	}
-#endif
-
 	if ( !ret) {
 		ret = SecCertificateCopyPublicKey(id_list[i].cert,
 						  &id_list[i].pubkey);
@@ -2014,6 +2042,13 @@ getaccesscontrol(SecKeyRef key)
 		return NULL;
 	}
 #endif
+
+	/*
+	 * I know; I lied.  SecKeyCopyAttributes() returns the same
+	 * information and is shorter.  Technically the access control
+	 * object SHOULDN'T be in there; we might need to switch back to
+	 * using the other code later.
+	 */
 
 	if (! (attrdict = SecKeyCopyAttributes(key))) {
 		os_log_debug(logsys, "Unable to get key attributes");
