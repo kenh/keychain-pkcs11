@@ -21,6 +21,8 @@ keychain_pkcs11_la_SOURCES = \
 			tables.h \
 			localauth.m \
 			localauth.h \
+			certutil.c \
+			certutil.h \
 			mypkcs11.h \
 			pkcs11.h \
 			pkcs11f.h \

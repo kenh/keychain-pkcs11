@@ -15,6 +15,7 @@
 
 #include "mypkcs11.h"
 #include "localauth.h"
+#include "certutil.h"
 #include "debug.h"
 #include "tables.h"
 #include "config.h"
