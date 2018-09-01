@@ -2330,16 +2330,7 @@ build_objects(struct session *se)
 
 	for (i = 0; i < id_list_count; i++) {
 		SecCertificateRef cert = id_list[i].cert;
-		CFDataRef subject;
-		const unsigned char *s_data = NULL;
-		size_t s_len;
-
-		subject = SecCertificateCopyNormalizedSubjectSequence(cert);
-
-		if (subject) {
-			s_data = CFDataGetBytePtr(subject);
-			s_len = CFDataGetLength(subject);
-		}
+		CFDataRef subject = NULL, issuer = NULL;
 
 #define OBJINIT() \
 do { \
@@ -2366,10 +2357,6 @@ do { \
 		ADD_ATTR(CKA_TOKEN, b);
 		ADD_ATTR_SIZE(CKA_LABEL, id_list[i].label,
 			      strlen(id_list[i].label));
-		d = SecCertificateCopyNormalizedIssuerSequence(cert);
-		ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(d),
-			      CFDataGetLength(d));
-		CFRelease(d);
 		d = SecCertificateCopySerialNumberData(cert, NULL);
 		ADD_ATTR_SIZE(CKA_SERIAL_NUMBER, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
@@ -2377,9 +2364,15 @@ do { \
 		d = SecCertificateCopyData(cert);
 		ADD_ATTR_SIZE(CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
+		get_certificate_info(d, &issuer, &subject);
 		CFRelease(d);
+
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
+			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+				      CFDataGetLength(subject));
+		if (issuer)
+			ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(issuer),
+				      CFDataGetLength(issuer));
 
 		NEW_OBJECT();
 		OBJINIT();
@@ -2396,7 +2389,8 @@ do { \
 		b = id_list[i].pubcanverify;
 		ADD_ATTR(CKA_VERIFY, b);
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
+			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+				      CFDataGetLength(subject));
 
 		NEW_OBJECT();
 		OBJINIT();
@@ -2413,12 +2407,15 @@ do { \
 		b = id_list[i].privcansign;
 		ADD_ATTR(CKA_SIGN, b);
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, s_data, s_len);
+			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+				      CFDataGetLength(subject));
 
 		NEW_OBJECT();
 
 		if (subject)
 			CFRelease(subject);
+		if (issuer)
+			CFRelease(issuer);
 	}
 
 	UNLOCK_MUTEX(id_mutex);

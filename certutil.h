@@ -2,4 +2,4 @@
  * Prototypes for our certificate utility functions
  */
 
-extern void get_certificate_subject(SecCertificateRef);
+extern bool get_certificate_info(CFDataRef, CFDataRef *, CFDataRef *);
