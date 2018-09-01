@@ -237,7 +237,7 @@ struct obj_info {
 	os_log_debug(logsys, "Object %lu (%s)", obj, \
 		     getCKOName(se->obj_list[obj].class));
 
-static void build_objects(struct session *);
+static void build_objects(struct session *, int);
 static void obj_free(struct obj_info *, unsigned int);
 
 /*
@@ -1035,7 +1035,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 	object--;
 
 	if (se->obj_list_count == 0)
-		build_objects(se);
+		build_objects(se, 1);
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
@@ -1105,7 +1105,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 	LOCK_MUTEX(se->mutex);
 
 	if (se->obj_list_count == 0)
-		build_objects(se);
+		build_objects(se, 1);
 
 	se->obj_search_index = 0;
 
@@ -1245,15 +1245,16 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	object--;
 
+	if (se->obj_list_count == 0)
+		build_objects(se, 0);
+
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_SignInit, CKR_KEY_HANDLE_INVALID);
 	}
 
 	if (! id_list[se->obj_list[object].id_index].privcansign) {
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
 	}
 
@@ -1346,6 +1347,8 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		os_log_debug(logsys, "Output size is %d, but our output "
 			     "buffer is %d", (int) se->sig_size, (int) *siglen);
 		*siglen = se->sig_size;
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
 		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
 	}
 
@@ -2311,7 +2314,7 @@ do { \
  */
 
 static void
-build_objects(struct session *se)
+build_objects(struct session *se, int lock)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
@@ -2320,7 +2323,8 @@ build_objects(struct session *se)
 	CK_BBOOL b;
 	CFDataRef d;
 
-	LOCK_MUTEX(id_mutex);
+	if (lock)
+		LOCK_MUTEX(id_mutex);
 
 	if (id_list_count > 0) {
 		/* Prime the pump */
@@ -2418,7 +2422,8 @@ do { \
 			CFRelease(issuer);
 	}
 
-	UNLOCK_MUTEX(id_mutex);
+	if (lock)
+		UNLOCK_MUTEX(id_mutex);
 }
 
 /*
