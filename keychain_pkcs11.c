@@ -1349,7 +1349,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		*siglen = se->sig_size;
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
-		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
+		RET(C_Sign, sig == NULL ? CKR_OK : CKR_BUFFER_TOO_SMALL);
 	}
 
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
