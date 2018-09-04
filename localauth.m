@@ -101,7 +101,7 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec,
 	       enum la_keyusage usage)
 {
 	LAContext *lac = (LAContext *) l;
-	NSData *password = [NSData dataWithBytes:bytes length: len];
+	NSData *password = [[NSData alloc] initWithBytes:bytes length: len];
 	SecAccessControlRef secaccess = sec;
 	LAAccessControlOperation acc_control;
 	__block BOOL b;
