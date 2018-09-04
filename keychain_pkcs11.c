@@ -177,6 +177,7 @@ struct session {
 	unsigned int	obj_search_index;	/* Current search index */
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
+	bool		logged_in;		/* Session is logged in */
 	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
 	SecKeyRef	sig_key;		/* Key for signing */
 	size_t		sig_size;		/* Size of sig, 0 is unknown */
@@ -686,8 +687,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 		token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
 	}
 
-	token_info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
-	token_info->ulSessionCount = CK_EFFECTIVELY_INFINITE;
+	token_info->ulMaxSessionCount = CK_EFFECTIVELY_INFINITE;
+	token_info->ulSessionCount = CK_UNAVAILABLE_INFORMATION;
 	token_info->ulMaxRwSessionCount = 0;
 	token_info->ulRwSessionCount = 0;
 	token_info->ulMaxPinLen = 255;
@@ -819,6 +820,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->obj_list_size = 0;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
+	sess->logged_in = false;
 	sess->sig_key = NULL;
 	sess->ver_key = NULL;
 
@@ -891,12 +893,14 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		       CK_SESSION_INFO_PTR session_info)
 {
+	struct session *se;
+
 	FUNCINITCHK(C_GetSessionInfo);
 
 	os_log_debug(logsys, "session = %d, session_info = %p",
 		     (int) session, session_info);
 
-	session--;
+	CHECKSESSION(session, se);
 
 	if (session > sess_list_count || sess_list[session] == NULL)
 		RET(C_GetSessionInfo, CKR_SESSION_HANDLE_INVALID);
@@ -905,8 +909,9 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
 	session_info->slotID = KEYCHAIN_SLOT;
-	session_info->state = CKS_RO_USER_FUNCTIONS;
-	session_info->flags = CKF_SERIAL_SESSION;
+	session_info->state = se->logged_in ? CKS_RO_USER_FUNCTIONS :
+						CKS_RO_PUBLIC_SESSION;
+	session_info->flags = CKF_SERIAL_SESSION ;
 	session_info->ulDeviceError = 0;
 
 	RET(C_GetSessionInfo, CKR_OK);
@@ -967,6 +972,8 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		os_log_debug(logsys, "We are NOT setting the PIN");
 	}
 
+	se->logged_in = true;
+
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -999,6 +1006,8 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 		os_log_debug(logsys, "Logging out of identity %d", i);
 		lacontext_logout(id_list[i].lacontext);
 	}
+
+	se->logged_in = false;
 
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2406,6 +2415,7 @@ do { \
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
 		ADD_ATTR(CKA_TOKEN, b);
+		ADD_ATTR(CKA_PRIVATE, b);
 		b = id_list[i].privcandecrypt;
 		ADD_ATTR(CKA_DECRYPT, b);
 		b = id_list[i].privcansign;
