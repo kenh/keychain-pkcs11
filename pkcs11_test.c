@@ -1,6 +1,7 @@
 /*
  *  pkcs11_test.c
- *  KeychainToken
+ *
+ *  Originally derived from pkcs11_test from KeychainToken:
  *
  *  Created by Jay Kline on 6/24/09.
  *  Copyright 2009,2016
@@ -37,10 +38,67 @@ static CK_RV dump_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
 		  CK_OBJECT_HANDLE, CK_ULONG *, ...);
 
 /*
- * Dump mechanism flags
+ * Dump various flags
  */
 
-static void mechflags_dump(CK_FLAGS);
+struct flags {
+    const char *name;
+    CK_FLAGS value;
+};
+
+#define FV(name) { #name, name }
+static struct flags slotflags[] = {
+    FV(CKF_TOKEN_PRESENT),
+    FV(CKF_REMOVABLE_DEVICE),
+    FV(CKF_HW_SLOT),
+    { NULL, 0 }
+};
+static struct flags tokenflags[] = {
+    FV(CKF_RNG),
+    FV(CKF_WRITE_PROTECTED),
+    FV(CKF_LOGIN_REQUIRED),
+    FV(CKF_USER_PIN_INITIALIZED),
+    FV(CKF_RESTORE_KEY_NOT_NEEDED),
+    FV(CKF_CLOCK_ON_TOKEN),
+    FV(CKF_PROTECTED_AUTHENTICATION_PATH),
+    FV(CKF_DUAL_CRYPTO_OPERATIONS),
+    FV(CKF_TOKEN_INITIALIZED),
+    FV(CKF_SECONDARY_AUTHENTICATION),
+    FV(CKF_USER_PIN_COUNT_LOW),
+    FV(CKF_USER_PIN_FINAL_TRY),
+    FV(CKF_USER_PIN_LOCKED),
+    FV(CKF_USER_PIN_TO_BE_CHANGED),
+    FV(CKF_SO_PIN_COUNT_LOW),
+    FV(CKF_SO_PIN_FINAL_TRY),
+    FV(CKF_SO_PIN_LOCKED),
+    FV(CKF_SO_PIN_TO_BE_CHANGED),
+    { NULL, 0 }
+};
+static struct flags sessionflags[] = {
+    FV(CKF_RW_SESSION),
+    FV(CKF_SERIAL_SESSION),
+    { NULL, 0 }
+};
+static struct flags mechflags[] = {
+    FV(CKF_HW),
+    FV(CKF_ENCRYPT),
+    FV(CKF_DECRYPT),
+    FV(CKF_DIGEST),
+    FV(CKF_SIGN),
+    FV(CKF_SIGN_RECOVER),
+    FV(CKF_VERIFY),
+    FV(CKF_VERIFY_RECOVER),
+    FV(CKF_GENERATE),
+    FV(CKF_GENERATE_KEY_PAIR),
+    FV(CKF_WRAP),
+    FV(CKF_UNWRAP),
+    FV(CKF_DERIVE),
+    FV(CKF_EXTENSION),
+    { NULL, 0 }
+};
+#undef FV
+
+static void flags_dump(struct flags *, CK_FLAGS);
 
 /*
  * Our routines to output attribute information
@@ -112,10 +170,61 @@ static struct attr_handler value_attr = {
 #endif
 
 /*
+ * A list of attribute information and associated filenames for output
+ */
+
+struct attr_list {
+	CK_ATTRIBUTE_TYPE	attribute;
+	CK_OBJECT_HANDLE	object;
+	const char 		*filename;
+	const char		*template;
+	struct attr_list	*next;
+};
+
+#define LIBRARY_NAME ".libs/keychain-pkcs11.so"
+
+/*
  * Read data into a buffer, reallocating it along the way
  */
 
 static void getdata(const char *, unsigned char **, size_t *);
+static CK_ULONG getnum(const char *, const char *);
+
+static void
+usage(const char *progname)
+{
+    fprintf(stderr, "Usage: %s [flags] [library name]\n", progname);
+    fprintf(stderr, "Library name defaults to: " LIBRARY_NAME "\n");
+    fprintf(stderr, "Valid flags are:\n");
+    fprintf(stderr, "\t-a attr\t\tNumeric attribute to dump (may be repeated "
+    		    "with -F)\n");
+    fprintf(stderr, "\t-c class\t\tNumeric class of objects to select; \n");
+    fprintf(stderr, "\t\t\tdefault is to apply to all objects\n");
+    fprintf(stderr, "\t-f file\t\tFile to dump attribute data to\n");
+    fprintf(stderr, "\t-F template\tFilename template to dump file data;\n");
+    fprintf(stderr, "\t\t\tfilename template supports the following items:\n");
+    fprintf(stderr, "\t\t\t%%o\tObject number\n");
+    fprintf(stderr, "\t\t\t%%a\tAttribute number\n");
+    fprintf(stderr, "\t\t\t%%s\tSlot number\n");
+    fprintf(stderr, "\t-L\t\tDo NOT log into card using C_Login\n");
+    fprintf(stderr, "\t-N num\t\tSign <num> bytes of NULs (may be "
+    		    "repeated)\n");
+    fprintf(stderr, "\t-n progname\tSet program name to <progname>\n");
+    fprintf(stderr, "\t-o object\tObject number to select for inspection or "
+    		    "use for other\n");
+    fprintf(stderr, "\t\t\toperations; affects next argument, may be repeated\n");
+    fprintf(stderr, "\t-s slot\t\tSelect this slot (default: first slot);\n");
+    fprintf(stderr, "\t\t\tmay be repeated\n");
+    fprintf(stderr, "\t-S signdata\tData to sign; requires -o, "
+		    "may be repeated\n");
+    fprintf(stderr, "\t-T\t\tAllow the use of slots WITHOUT tokens\n");
+    fprintf(stderr, "\t-v filename\tFilename of data to verify signature;\n");
+    fprintf(stderr, "\t\t\tuse -V for signature data and -o to select key\n");
+    fprintf(stderr, "\t-V filename\tSignature data for verification; use "
+    	    "with -v and -o\n");
+    fprintf(stderr, "\t-w\t\tInstead of exiting, wait for Control-C\n");
+    exit(1);
+}
 
 int main(int argc, char *argv[]) {
     CK_RV rv;
@@ -135,51 +244,66 @@ int main(int argc, char *argv[]) {
     CK_ULONG maxSize;
     CK_ULONG count;
 
-    CK_OBJECT_CLASS cls;
+    CK_OBJECT_CLASS cls = -1;
     CK_CERTIFICATE_TYPE certtype;
     CK_ATTRIBUTE attrs[10];
     CK_ULONG ulValue;
 
     CK_ULONG numSlots = 0;
     CK_SLOT_ID_PTR slotList = NULL;
-    CK_SLOT_ID validSlot = -1;
     CK_SLOT_INFO slotInfo;
     CK_OBJECT_HANDLE sObject = -1;
     CK_ATTRIBUTE_TYPE dumpType = -1;
-    const char *dumpFile = NULL;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
     CK_MECHANISM mech = { sMech, NULL, 0 };
     const char *verify_data = NULL;
     const char *verify_sig = NULL;
+    const char *attr_filename = NULL;
+    const char *attr_filetemplate = NULL;
 
     unsigned char *signbuf = NULL;
     unsigned int signsize = 0;
     bool sleepatexit = false;
+    bool tokenlogin = true;
+    bool requiretoken = true;
+
+    struct attr_list *attr_head = NULL, *attr_tail = NULL, *attr;
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:f:L:N:n:o:S:s:v:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
 	switch (i) {
 	case 'a':
-	{
-	    char *endptr;
-
-	    dumpType = strtol(optarg, &endptr, 0);
-
-	    if (*endptr != '\0') {
-		fprintf(stderr, "Invalid numeric attribute type: %s\n", optarg);
+	    if (!attr_filename && !attr_filetemplate) {
+		fprintf(stderr, "One of -f or -F must be given first!\n");
 		exit(1);
 	    }
-	}
+
+	    attr = malloc(sizeof(struct attr_list));
+	    attr->attribute = getnum(optarg, "Invalid attribute number");
+	    attr->object = sObject;
+	    attr->filename = attr_filename;
+	    attr->template = attr_filetemplate;
+	    attr->next = NULL;
+
+	    if (!attr_tail) {
+	    	attr_head = attr_tail = attr;
+	    } else {
+		attr_tail->next = attr;
+		attr_tail = attr;
+	    }
+
 	    break;
 	case 'f':
-	    dumpFile = optarg;
+	    attr_filename = optarg;
+	    attr_filetemplate = NULL;
+	    break;
+	case 'F':
+	    attr_filetemplate = optarg;
+	    attr_filename = NULL;
 	    break;
 	case 'L':
-	    if (! dlopen(optarg, RTLD_NOW)) {
-		fprintf(stderr, "Unable to open %s: %s\n", optarg, dlerror());
-		exit(1);
-	    }
+	    tokenlogin = false;
 	    break;
 	case 'N':
 	    signsize = atoi(optarg);
@@ -192,14 +316,17 @@ int main(int argc, char *argv[]) {
 #endif /* HAVE_SETPROGNAME */
 	    break;
 	case 's':
-	    slot = atoi(optarg);
+	    slot = getnum(optarg, "Invalid slot number");
 	    break;
 	case 'S':
 	    signbuf = (unsigned char *) optarg;
 	    signsize = strlen(optarg);
 	    break;
+	case 'T':
+	    requiretoken = false;
+	    break;
 	case 'o':
-	    sObject = atoi(optarg);
+	    sObject = getnum(optarg, "Invalid object number");
 	    break;
 	case 'v':
 	    verify_data = optarg;
@@ -212,20 +339,7 @@ int main(int argc, char *argv[]) {
 	    break;
 	case '?':
 	default:
-	    fprintf(stderr, "Usage: %s\n"
-		    "\t\t[-a attribute number]\n"
-		    "\t\t[-f dump file]\n"
-		    "\t\t[-s slotnumber]\n"
-		    "\t\t[-n progname]\n"
-		    "\t\t[-N bufsize]\n"
-		    "\t\t[-S string-to-sign]\n"
-		    "\t\t[-o object]\n"
-		    "\t\t[-v data-file]\n"
-		    "\t\t[-V sig-file]\n"
-		    "\t\t[-L library-to-dlopen]\n"
-		    "\t\t[-w]\n"
-		    "\t\tpkcs11_library\n", argv[0]);
-	    exit(1);
+	    usage(argv[0]);
 	}
     }
 
@@ -234,16 +348,11 @@ int main(int argc, char *argv[]) {
 	exit(1);
     }
 
-    if (dumpType != -1 && (! dumpFile || sObject == -1)) {
-	fprintf(stderr, "When using -a, -o and -f must be given\n");
-	exit(1);
-    }
-
     argc -= optind - 1;
     argv += optind - 1;
 
     if(argc == 1) {
-        rv = load_library("keychain_pkcs11.dylib", &p11p);
+        rv = load_library(LIBRARY_NAME, &p11p);
     } else {
         rv = load_library(argv[1], &p11p);
     }
@@ -270,18 +379,24 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to get info (rv = %s)\n", getCKRName(rv));
     }
 
-
-    rv = p11p->C_GetSlotList(TRUE, NULL, &numSlots);
+    rv = p11p->C_GetSlotList(requiretoken == true ? TRUE : FALSE, NULL,
+			     &numSlots);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error getting Slot List\n");
         return(rv);
     }
+
+    if (numSlots == 0) {
+	fprintf(stderr, "No slots found!\n");
+	exit(1);
+    }
+
     printf("Found %d slots\n", (int) numSlots);
 
     slotList = (CK_SLOT_ID_PTR) malloc(sizeof(CK_SLOT_ID) * (numSlots + 1));
-    if (!slotList) return(-1);
 
-    rv = p11p->C_GetSlotList(TRUE, slotList, &numSlots);
+    rv = p11p->C_GetSlotList(requiretoken == true ? TRUE : FALSE, slotList,
+			     &numSlots);
     if (rv != CKR_OK) {
         free(slotList);
         fprintf(stderr, "Error getting Slot List\n");
@@ -296,29 +411,20 @@ int main(int argc, char *argv[]) {
 	}
         rv = p11p->C_GetSlotInfo(slotList[i], &slotInfo);
         if (rv != CKR_OK) continue;
-        if (!(slotInfo.flags & CKF_TOKEN_PRESENT)) {
-            fprintf(stderr,"Slot %d has no token present\n", (int) slotList[i]);
-            continue;
-        } else {
-            printf("Slot %d description: %s\n", (int) slotList[i],  stringify(slotInfo.slotDescription, 64));
-        }
-        validSlot = slotList[i];
+
+        printf("Slot %d description: %s\n", (int) slotList[i],
+	       stringify(slotInfo.slotDescription, 64));
     }
 
     if (! p11p->C_GetSlotInfo && numSlots > 0) {
 	fprintf(stderr, "C_GetSlotInfo is NULL, assuming first slot "
 		"is valid\n");
-	validSlot = 0;
     }
 
     if (slotList) free(slotList);
-    if (validSlot == -1)
-        fprintf(stderr, "No slots with tokens!\n");
-
-
 
     if (slot == -1)
-	slot = validSlot;
+	slot = slotList[0];
 
     memset(&sInfo, 0, sizeof(sInfo));
     if (p11p->C_GetSlotInfo) {
@@ -331,9 +437,9 @@ int main(int argc, char *argv[]) {
         printf("Slot Manufacturer: %s\n", stringify(sInfo.manufacturerID, 32));
         printf("Slot HW version: %d.%d\n", sInfo.hardwareVersion.major, sInfo.hardwareVersion.minor);
         printf("Slot FW version: %d.%d\n", sInfo.firmwareVersion.major, sInfo.firmwareVersion.minor);
-        printf("Slot has token: %s\n", (sInfo.flags & CKF_TOKEN_PRESENT ? "yes" : "no"));
-        printf("Slot supports removeable tokens: %s\n", (sInfo.flags & CKF_REMOVABLE_DEVICE ? "yes" : "no"));
-        printf("Slot is a hardware slot: %s\n", (sInfo.flags & CKF_HW_SLOT ? "yes" : "no"));
+	printf("Slot flags: ");
+	flags_dump(slotflags, sInfo.flags);
+	printf("\n");
     } else {
         fprintf(stderr, "Error getting slot info (rv = %s)\n", getCKRName(rv));
     }
@@ -345,7 +451,9 @@ int main(int argc, char *argv[]) {
         printf("Token Manufacturer: %s\n", stringify(tInfo.manufacturerID, 32));
         printf("Token Model: %s\n", stringify(tInfo.model,16));
         printf("Token Serial: %s\n", stringify(tInfo.serialNumber,16));
-        printf("Token flags = 0x%x (%d)\n", (unsigned int) tInfo.flags, (int) tInfo.flags);
+        printf("Token flags: ");
+	flags_dump(tokenflags, tInfo.flags);
+	printf("\n");
         printf("Token MaxSessionCount = %d\n", (int) tInfo.ulMaxSessionCount);
         printf("Token SessionCount = %d\n", (int) tInfo.ulSessionCount);
         printf("Token MaxRwSessionCount = %d\n", (int) tInfo.ulMaxRwSessionCount);
@@ -393,7 +501,7 @@ int main(int argc, char *argv[]) {
 		printf("Min key size = %lu, max key size = %lu\n",
 		       mechInfo.ulMinKeySize, mechInfo.ulMaxKeySize);
 		printf("Flags: ");
-		mechflags_dump(mechInfo.flags);
+		flags_dump(mechflags, mechInfo.flags);
 		printf("\n");
 	    }
 	}
@@ -403,6 +511,7 @@ int main(int argc, char *argv[]) {
     if (rv != CKR_OK)
 	fprintf(stderr, "GetMechanismList failed (rv = %s)\n", getCKRName(rv));
 
+#if 0
     rv = p11p->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, &hSession);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error opening session (rv = %s)\n", getCKRName(rv));
@@ -830,6 +939,7 @@ int main(int argc, char *argv[]) {
     if (p11p->C_Logout)
 	p11p->C_Logout(hSession);
     (void)p11p->C_CloseSession(hSession);
+#endif
 cleanup:
     if (p11p) p11p->C_Finalize(0);
 
@@ -1200,40 +1310,18 @@ keytype_dump(unsigned char *data, unsigned int len)
 }
 
 /*
- * Dump a seris of mechanism flags
+ * Dump a series of flags
  */
 
-#define FV(name) { #name, name }
-static struct {
-    const char *name;
-    CK_FLAGS value;
-} mechflags[] = {
-    FV(CKF_HW),
-    FV(CKF_ENCRYPT),
-    FV(CKF_DECRYPT),
-    FV(CKF_DIGEST),
-    FV(CKF_SIGN),
-    FV(CKF_SIGN_RECOVER),
-    FV(CKF_VERIFY),
-    FV(CKF_VERIFY_RECOVER),
-    FV(CKF_GENERATE),
-    FV(CKF_GENERATE_KEY_PAIR),
-    FV(CKF_WRAP),
-    FV(CKF_UNWRAP),
-    FV(CKF_DERIVE),
-    FV(CKF_EXTENSION),
-    { NULL, 0 }
-};
-
 static void
-mechflags_dump(CK_FLAGS flags)
+flags_dump(struct flags *flagmap, CK_FLAGS flags)
 {
     int i;
     bool hit = false;
 
-    for (i = 0; mechflags[i].name != NULL; i++) {
-	if (flags & mechflags[i].value) {
-	    printf("%s%s", hit ? "|" : "", mechflags[i].name);
+    for (i = 0; flagmap[i].name != NULL; i++) {
+	if (flags & flagmap[i].value) {
+	    printf("%s%s", hit ? "|" : "", flagmap[i].name);
 	    hit = true;
 	}
     }
@@ -1248,30 +1336,50 @@ mechflags_dump(CK_FLAGS flags)
 static void
 getdata(const char *filename, unsigned char **buf, size_t *size)
 {
-	int fd, cc;
-	*size = 0;
-	*buf = NULL;
+    int fd, cc;
+    *size = 0;
+    *buf = NULL;
 
-	if ((fd = open(filename, O_RDONLY)) < 0) {
-		fprintf(stderr, "Unable to open \"%s\": %s\n", filename,
-			strerror(errno));
-		exit(1);
+    if ((fd = open(filename, O_RDONLY)) < 0) {
+	fprintf(stderr, "Unable to open \"%s\": %s\n", filename,
+		strerror(errno));
+	exit(1);
+    }
+
+    do {
+	*buf = realloc(*buf, *size + RSIZE);
+	cc = read(fd, *buf + *size, RSIZE);
+
+	if (cc < 0) {
+	    fprintf(stderr, "Read on \"%s\" failed: %s\n", filename,
+		    strerror(errno));
+	    exit(1);
 	}
 
-	do {
-		*buf = realloc(*buf, *size + RSIZE);
-		cc = read(fd, *buf + *size, RSIZE);
+	*size += cc;
+    } while (cc > 0);
 
-		if (cc < 0) {
-			fprintf(stderr, "Read on \"%s\" failed: %s\n", filename,
-				strerror(errno));
-			exit(1);
-		}
+    close(fd);
 
-		*size += cc;
-	} while (cc > 0);
+    return;
+}
 
-	close(fd);
+/*
+ * Returns a number, or exit()s on failure
+ */
 
-	return;
+static CK_ULONG
+getnum(const char *number, const char *errstring)
+{
+    char *endptr;
+    unsigned long val;
+
+    val = strtoul(number, &endptr, 0);
+
+    if (*endptr != '\0') {
+	fprintf(stderr, "%s: %s\n", errstring, number);
+	exit(1);
+    }
+
+    return val;
 }
