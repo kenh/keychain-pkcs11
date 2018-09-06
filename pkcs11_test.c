@@ -554,7 +554,7 @@ int main(int argc, char *argv[]) {
 
     if (rv == CKR_OK) {
         printf("Session slot: %d\n", (int) sessionInfo.slotID);
-        printf("Session state: %d\n", (int) sessionInfo.state);
+        printf("Session state: %s\n", getCKSName(sessionInfo.state));
         printf("Session flags: %d\n", (int) sessionInfo.flags);
         printf("Session device errors: %d\n", (int) sessionInfo.ulDeviceError);
     } else {
@@ -568,6 +568,13 @@ int main(int argc, char *argv[]) {
 		    getCKRName(rv));
 	    (void)p11p->C_CloseSession(hSession);
 	    goto cleanup;
+	}
+	if (p11p->C_GetSessionInfo) {
+	    memset(&sessionInfo, 0, sizeof(sessionInfo));
+	    rv = p11p->C_GetSessionInfo(hSession, &sessionInfo);
+	    if (rv == CKR_OK)
+		printf("Post-login session state: %s\n",
+		       getCKSName(sessionInfo.state));
 	}
     }
 
@@ -1182,6 +1189,8 @@ dump_object_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 {
     CK_RV rv;
     CK_ATTRIBUTE attr;
+
+    printf("Object %lu:\n", obj);
 
     /*
      * Determine the class of an object; if we were passed in something

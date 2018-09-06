@@ -51,6 +51,8 @@ char *stringify(unsigned char *str, int length) {
     return(my_string);
 }
 
+#define CS(name) case name: return #name
+
 const char * getCKMName(CK_MECHANISM_TYPE mech) {
     switch (mech) {
         case CKM_RSA_PKCS_KEY_PAIR_GEN: return "CKM_RSA_PKCS_KEY_PAIR_GEN";
@@ -608,6 +610,17 @@ const char * getCKCName(CK_CERTIFICATE_TYPE ctype) {
     }
 }
 
+const char * getCKSName(CK_STATE state) {
+    switch (state) {
+	CS(CKS_RO_PUBLIC_SESSION);
+	CS(CKS_RO_USER_FUNCTIONS);
+	CS(CKS_RW_PUBLIC_SESSION);
+	CS(CKS_RW_USER_FUNCTIONS);
+	CS(CKS_RW_SO_FUNCTIONS);
+	default:
+	    return "Unknown State";
+    }
+}
 
 #if 0
 const char * getSecErrorName(int status) {

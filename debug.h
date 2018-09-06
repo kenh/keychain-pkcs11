@@ -49,7 +49,10 @@ const char * getCKAName(CK_ATTRIBUTE_TYPE attrib);
 const char * getCKOName(CK_OBJECT_CLASS class);
 const char * getCKMName(CK_MECHANISM_TYPE mech);
 const char * getCKCName(CK_CERTIFICATE_TYPE ctype);
+const char * getCKSName(CK_STATE state);
+#if 0
 const char * getSecErrorName(int status);
+#endif
 char *hexify(unsigned char *data, int len);
 char *stringify(unsigned char *str, int length);
 
