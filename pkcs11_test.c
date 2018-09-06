@@ -29,13 +29,30 @@
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
+#include <ctype.h>
 
 /*
  * Dump one or more attributes of an object
  */
 
 static CK_RV dump_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
-		  CK_OBJECT_HANDLE, CK_ULONG *, ...);
+		  CK_OBJECT_HANDLE, CK_OBJECT_CLASS, ...);
+
+/*
+ * Dump all of the "interesting" attributes in an object
+ */
+
+static void dump_object_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+			     CK_OBJECT_HANDLE, CK_OBJECT_CLASS);
+
+/*
+ * Write out one or more attributes of an object
+ */
+
+struct attr_list;
+
+static void write_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+			struct attr_list *);
 
 /*
  * Dump various flags
@@ -118,6 +135,7 @@ static void class_dump(unsigned char *, unsigned int);
 static void mech_dump(unsigned char *, unsigned int);
 static void mechlist_dump(unsigned char *, unsigned int);
 static void keytype_dump(unsigned char *, unsigned int);
+static void partial_ascii_dump(unsigned char *, unsigned int);
 
 static struct attr_handler id_attr = {
     CKA_ID, "Key Identifier", hexify_dump
@@ -152,7 +170,7 @@ static struct attr_handler allowedmech_attr = {
 };
 
 static struct attr_handler subject_attr = {
-    CKA_SUBJECT, "Subject name", hexify_dump
+    CKA_SUBJECT, "Subject name", partial_ascii_dump
 };
 
 static struct attr_handler keytype_attr = {
@@ -160,7 +178,7 @@ static struct attr_handler keytype_attr = {
 };
 
 static struct attr_handler issuer_attr = {
-    CKA_ISSUER, "Certificate issuer", hexify_dump
+    CKA_ISSUER, "Certificate issuer", partial_ascii_dump
 };
 
 #if 0
@@ -176,6 +194,7 @@ static struct attr_handler value_attr = {
 struct attr_list {
 	CK_ATTRIBUTE_TYPE	attribute;
 	CK_OBJECT_HANDLE	object;
+	CK_OBJECT_CLASS		class;
 	const char 		*filename;
 	const char		*template;
 	struct attr_list	*next;
@@ -253,7 +272,6 @@ int main(int argc, char *argv[]) {
     CK_SLOT_ID_PTR slotList = NULL;
     CK_SLOT_INFO slotInfo;
     CK_OBJECT_HANDLE sObject = -1;
-    CK_ATTRIBUTE_TYPE dumpType = -1;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
     CK_MECHANISM mech = { sMech, NULL, 0 };
     const char *verify_data = NULL;
@@ -279,9 +297,15 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	    }
 
+	    if (cls == -1 && sObject == -1) {
+		fprintf(stderr, "One of -c or -o must be given first!\n");
+		exit(1);
+	    }
+
 	    attr = malloc(sizeof(struct attr_list));
 	    attr->attribute = getnum(optarg, "Invalid attribute number");
 	    attr->object = sObject;
+	    attr->class = cls;
 	    attr->filename = attr_filename;
 	    attr->template = attr_filetemplate;
 	    attr->next = NULL;
@@ -293,6 +317,10 @@ int main(int argc, char *argv[]) {
 		attr_tail = attr;
 	    }
 
+	    break;
+	case 'c':
+	    cls = getnum(optarg, "Invalid object class number");
+	    sObject = -1;
 	    break;
 	case 'f':
 	    attr_filename = optarg;
@@ -327,6 +355,7 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 'o':
 	    sObject = getnum(optarg, "Invalid object number");
+	    cls = -1;
 	    break;
 	case 'v':
 	    verify_data = optarg;
@@ -543,26 +572,62 @@ int main(int argc, char *argv[]) {
     }
 
     /*
-     * If we are given an object, just extract that object's information.
+     * If we are given a list of attributes to write out to a file, then
+     * do that.
      * If we are given an object class, then just find objects in that class.
+     * If we are given an object, just extract that object's information.
      * Otherwise, find all objects.
      */
 
+    if (attr_head) {
 #if 0
-    if (dumpType != -1) {
-	FILE *out;
-	attrs[0].type = dumpType;
-	attrs[0].pValue = NULL;
-	attrs[0].ulValueLen = 0;
+	for (attr = attr_head; attr != NULL; attr = attr->next)
+	    write_attrs(p11p, hSession, attr);
+#endif
+    } else if (sObject != -1) {
+	dump_object_info(p11p, hSession, sObject, -1);
+    } else {
+	/*
+	 * If we were given a class, then use that as the search template.
+	 * Otherwise pass in an empty template
+	 */
 
-	rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
+	size_t total = 0;
+	count = 0;
 
-	if (rv != CKR_OK && rv != CKR_BUFFER_TOO_SMALL) {
-	    fprintf(stderr, "C_GetAttributeValue dump for attribute %lu (%s) "
-		    "failed (rv = %s)\n", dumpType, getCKAName(dumpType),
+	if (cls != -1) {
+	    attrs[0].type = CKA_CLASS;
+	    attrs[0].pValue = &cls;
+	    attrs[0].ulValueLen = sizeof(cls);
+	    count = 1;
+	}
+
+	rv = p11p->C_FindObjectsInit(hSession, attrs, count);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "C_FindObjectsInit failed (rv = %s)\n",
 		    getCKRName(rv));
 	    exit(1);
 	}
+
+	maxSize = 10;
+	phObject = malloc(maxSize * sizeof(CK_OBJECT_HANDLE_PTR));
+
+	do {
+	    rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+
+	    for (i = 0; i < count; i++) {
+		dump_object_info(p11p, hSession, phObject[i], cls);
+	    }
+
+	    total += count;
+	} while (count > 0);
+
+	printf("%d objects found\n", (int) total);
+    }
+
+#if 0
+	rv = p11p->C_GetAttributeValue(hSession, sObject, attrs, 1);
 
 	attrs[0].pValue = malloc(attrs[0].ulValueLen);
 
@@ -592,18 +657,12 @@ int main(int argc, char *argv[]) {
 	exit(0);
     }
 
-
-
-
     rv = p11p->C_FindObjectsInit(hSession, NULL, 0);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error initializing Find Objects (rv = %s)\n", getCKRName(rv));
         (void)p11p->C_CloseSession(hSession);
         goto cleanup;
     }
-
-    maxSize = 10;
-    phObject = malloc(maxSize * sizeof(CK_OBJECT_HANDLE_PTR));
 
 
     do {
@@ -1114,28 +1173,88 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
 }
 
 /*
+ * Dump out interesting attributes for an object.
+ */
+
+static void
+dump_object_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
+		 CK_OBJECT_HANDLE obj, CK_OBJECT_CLASS classhint)
+{
+    CK_RV rv;
+    CK_ATTRIBUTE attr;
+
+    /*
+     * Determine the class of an object; if we were passed in something
+     * valid in "classhint" then use that (because that's what we searched
+     * on).
+     */
+
+    if (classhint == -1) {
+	attr.type = CKA_CLASS;
+	attr.pValue = &classhint;
+	attr.ulValueLen = sizeof(classhint);
+
+	rv = p11p->C_GetAttributeValue(session, obj, &attr, 1);
+
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "C_GetAttributeValue(CKA_CLASS) for object %d "
+		    "failed (rv = %s)\n", (int) obj, getCKRName(rv));
+	    exit(1);
+	}
+    }
+
+    switch (classhint) {
+	case CKO_CERTIFICATE:
+	    dump_attrs(p11p, session, obj, classhint, &ctype_attr,
+		       &id_attr, &value_attr, &subject_attr, &issuer_attr,
+		       (void *) NULL);
+	    break;
+	case CKO_DATA:
+	    dump_attrs(p11p, session, obj, classhint, &app_attr,
+		       &objid_attr, &value_attr, (void *) NULL);
+	    break;
+	case CKO_PUBLIC_KEY:
+	case CKO_PRIVATE_KEY:
+	    dump_attrs(p11p, session, obj, classhint, &id_attr,
+		       &keytype_attr, &genmech_attr, &allowedmech_attr,
+		       &subject_attr, (void *) NULL);
+	    break;
+	default:
+	    dump_attrs(p11p, session, obj, classhint, &value_attr,
+		       (void *) NULL);
+	    break;
+    }
+}
+
+/*
  * Dump out attributes for a specific object.  Argument list should end
  * with a NULL.
  */
 
 static CK_RV
 dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
-	   CK_OBJECT_HANDLE obj, CK_ULONG *retval, ...)
+	   CK_OBJECT_HANDLE obj, CK_OBJECT_CLASS class, ...)
 {
     va_list ap;
     struct attr_handler *ah;
     CK_ATTRIBUTE template;
     CK_RV rv, rvret = CKR_OK;
-    bool valret = false;
 
-    va_start(ap, retval);
+    printf("%s: ", class_attr.label);
+    class_attr.dumper((unsigned char *) &class, sizeof(class));
+    printf("\n");
+
+    va_start(ap, class);
 
     while ((ah = va_arg(ap, struct attr_handler *))) {
 	template.type = ah->attr;
 	template.pValue = NULL;
 	template.ulValueLen = 0;
 	rv = p11p->C_GetAttributeValue(session, obj, &template, 1);
-	if (rv != CKR_OK) {
+	if (rv == CKR_ATTRIBUTE_TYPE_INVALID) {
+	    printf("%s: <No such attribute>\n", ah->label);
+	    continue;
+	} else if (rv != CKR_OK) {
 	    printf("%s: C_GetAttributeValue returned %s\n", ah->label,
 		   getCKRName(rv));
 	    rvret = rv;
@@ -1157,16 +1276,6 @@ dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 	printf("%s: ", ah->label);
 	(*ah->dumper)(template.pValue, template.ulValueLen);
 	printf("\n");
-
-	/*
-	 * If we were passed in a value to return, then return the first
-	 * item that was the correct size (sizeof(CK_ULONG))
-	 */
-
-	if (retval && !valret) {
-	    *retval = *((CK_ULONG *) template.pValue);
-	    valret = true;
-	}
 
 	free(template.pValue);
     }
@@ -1315,6 +1424,30 @@ keytype_dump(unsigned char *data, unsigned int len)
 	break;
     default:
 	printf("Unknown key type: %#lx", *keytype);
+    }
+}
+
+/*
+ * Dump something which might contain ASCII information, but not all.
+ */
+
+static void
+partial_ascii_dump(unsigned char *data, unsigned int len)
+{
+    size_t column = 1;
+
+    putchar('\n');
+
+    while (len-- > 0) {
+	if (isascii((int) *data) && isprint((int) *data))
+	    putchar((int) *data);
+	else
+	    putchar('.');
+	if (column++ >= 60) {
+	    putchar('\n');
+	    column = 1;
+	}
+	data++;
     }
 }
 
