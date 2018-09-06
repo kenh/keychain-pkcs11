@@ -36,7 +36,7 @@
  */
 
 static CK_RV dump_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
-		  CK_OBJECT_HANDLE, CK_OBJECT_CLASS, ...);
+			CK_OBJECT_HANDLE, CK_OBJECT_CLASS, ...);
 
 /*
  * Dump all of the "interesting" attributes in an object
@@ -51,7 +51,7 @@ static void dump_object_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
 
 struct attr_list;
 
-static void write_attrs(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+static void write_attrs(CK_FUNCTION_LIST_PTR, CK_SLOT_ID, CK_SESSION_HANDLE,
 			struct attr_list *);
 
 /*
@@ -587,10 +587,8 @@ int main(int argc, char *argv[]) {
      */
 
     if (attr_head) {
-#if 0
 	for (attr = attr_head; attr != NULL; attr = attr->next)
 	    write_attrs(p11p, hSession, attr);
-#endif
     } else if (sObject != -1) {
 	dump_object_info(p11p, hSession, sObject, -1);
     } else {
@@ -1179,6 +1177,86 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
 
 }
 
+/*
+ * Write out attributes to a file
+ */
+
+static void
+write_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
+	   CK_SESSION_HANDLE session, struct attr_list *ah)
+{
+    struct addr_list *attr;
+
+    for (attr = ah; attr != NULL; attr = attr->next) {
+	if (attr->object) {
+	    write_object_attr(p11p, slot, session, attr->object, attr);
+	} else {
+
+static void
+write_object_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
+		  CK_SESSION_HANDLE session, CK_OBJECT_HANDLE obj,
+		  struct attr_list *attr)
+{
+    CK_ATTRIBUTE at;
+    CK_RV rv;
+    FILE *f;
+    const char *filename;
+
+    memset(&at, 0, sizeof(at));
+    at.type = attr->attribute;
+    rv = p11p->C_GetAttributeValue(session, obj, &at, 1);
+    if (rv != CKR_OK && rv != CKR_BUFFER_TOO_SMALL) {
+	fprintf(stderr, "C_GetAttributeValue on %lu (%s) failed (rv = %s)\n",
+		attr->attribute, getCKAName(attr->attribute), getCKRName(rv));
+	return;
+    }
+
+    at.pValue = malloc(at.ulValueLen);
+
+    rv = p11p->C_GetAttributeValue(session, obj, &at, 1);
+    if (rv != CKR_OK) {
+	fprintf(stderr, "C_GetAttributeValue on &lu (%s) failed (rv = %s)\n",
+		attr->attribute, getCKAName(attr->attribute), getCKRName(rv));
+	free(at.pValue);
+	return;
+    }
+
+    if (attr->template)
+	filename = gettemplate(attr->template, slot, object, attr->attribute);
+    else
+	filename = attr->filename;
+
+    if (!(f = fopen(filename, "w"))) {
+	fprintf(stderr, "Unable to open \"%s\": %s\n", filename,
+		strerror(errno));
+	free(at.pValue);
+	return;
+    }
+
+    fwrite(at.pValue, at.ulValueLen, 1, f);
+    fclose(f);
+    free(at.pValue);
+
+    printf("Wrote %d bytes to %s\n", (int) at.ulValueLen, filename);
+}
+
+/*
+ * Process a template string
+ */
+
+static char *
+gettemplate(const char *template, CK_SLOT_ID slot, CK_OBJECT_HANDLE obj,
+	    CK_ATTRIBUTE_TYPE attrib)
+{
+    static char *retstr = NULL;
+    static size_t retlen = 0;
+    int curlen = 0;
+
+    while (*template != '\0') {
+	switch (*template) {
+	case '%':
+	    template++;
+}
 /*
  * Dump out interesting attributes for an object.
  */
