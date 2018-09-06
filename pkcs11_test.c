@@ -511,7 +511,6 @@ int main(int argc, char *argv[]) {
     if (rv != CKR_OK)
 	fprintf(stderr, "GetMechanismList failed (rv = %s)\n", getCKRName(rv));
 
-#if 0
     rv = p11p->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, &hSession);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error opening session (rv = %s)\n", getCKRName(rv));
@@ -533,13 +532,23 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to get session info (rv = %s)\n", getCKRName(rv));
     }
 
-    rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
-    if (rv != CKR_OK) {
-        fprintf(stderr, "Error logging into token (rv = %s)\n", getCKRName(rv));
-        (void)p11p->C_CloseSession(hSession);
-        goto cleanup;
+    if (tokenlogin) {
+	rv = login(p11p, &tInfo, hSession, 0, NULL, 0);
+	if (rv != CKR_OK) {
+	    fprintf(stderr, "Error logging into token (rv = %s)\n",
+		    getCKRName(rv));
+	    (void)p11p->C_CloseSession(hSession);
+	    goto cleanup;
+	}
     }
 
+    /*
+     * If we are given an object, just extract that object's information.
+     * If we are given an object class, then just find objects in that class.
+     * Otherwise, find all objects.
+     */
+
+#if 0
     if (dumpType != -1) {
 	FILE *out;
 	attrs[0].type = dumpType;
