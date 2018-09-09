@@ -54,6 +54,13 @@ struct attr_list;
 static void write_attrs(CK_FUNCTION_LIST_PTR, CK_SLOT_ID, CK_SESSION_HANDLE,
 			struct attr_list *);
 
+static void write_object_attr(CK_FUNCTION_LIST_PTR, CK_SLOT_ID,
+			      CK_SESSION_HANDLE, CK_OBJECT_HANDLE,
+			      struct attr_list *);
+
+static char *gettemplate(const char *, CK_SLOT_ID, CK_OBJECT_HANDLE,
+			 CK_ATTRIBUTE_TYPE);
+
 /*
  * Dump various flags
  */
@@ -192,15 +199,26 @@ static struct attr_handler value_attr = {
  */
 
 struct attr_list {
-	CK_ATTRIBUTE_TYPE	attribute;
-	CK_OBJECT_HANDLE	object;
-	CK_OBJECT_CLASS		class;
-	const char 		*filename;
-	const char		*template;
-	struct attr_list	*next;
+    CK_ATTRIBUTE_TYPE	attribute;
+    CK_OBJECT_HANDLE	object;
+    CK_OBJECT_CLASS	class;
+    const char 		*filename;
+    const char		*template;
+    struct attr_list	*next;
 };
 
 #define LIBRARY_NAME ".libs/keychain-pkcs11.so"
+
+/*
+ * Linked list of signing data
+ */
+
+struct sign_list {
+    unsigned char	*data;
+    size_t		size;
+    CK_OBJECT_HANDLE	object;
+    struct sign_list	*next;
+};
 
 /*
  * Read data into a buffer, reallocating it along the way
@@ -217,7 +235,7 @@ usage(const char *progname)
     fprintf(stderr, "Valid flags are:\n");
     fprintf(stderr, "\t-a attr\t\tNumeric attribute to dump (may be repeated "
     		    "with -F)\n");
-    fprintf(stderr, "\t-c class\t\tNumeric class of objects to select; \n");
+    fprintf(stderr, "\t-c class\tNumeric class of objects to select; \n");
     fprintf(stderr, "\t\t\tdefault is to apply to all objects\n");
     fprintf(stderr, "\t-f file\t\tFile to dump attribute data to\n");
     fprintf(stderr, "\t-F template\tFilename template to dump file data;\n");
@@ -233,7 +251,9 @@ usage(const char *progname)
     		    "use for other\n");
     fprintf(stderr, "\t\t\toperations; affects next argument, may be repeated\n");
     fprintf(stderr, "\t-s slot\t\tSelect this slot (default: first slot);\n");
+#if 0
     fprintf(stderr, "\t\t\tmay be repeated\n");
+#endif
     fprintf(stderr, "\t-S signdata\tData to sign; requires -o, "
 		    "may be repeated\n");
     fprintf(stderr, "\t-T\t\tAllow the use of slots WITHOUT tokens\n");
@@ -279,8 +299,8 @@ int main(int argc, char *argv[]) {
     const char *attr_filename = NULL;
     const char *attr_filetemplate = NULL;
 
-    unsigned char *signbuf = NULL;
-    unsigned int signsize = 0;
+    struct sign_list *sign_head = NULL, *sign_tail = NULL, *sign;
+
     bool sleepatexit = false;
     bool tokenlogin = true;
     bool requiretoken = true;
@@ -334,9 +354,27 @@ int main(int argc, char *argv[]) {
 	    tokenlogin = false;
 	    break;
 	case 'N':
-	    signsize = atoi(optarg);
-	    signbuf = malloc(signsize);
-	    memset(signbuf, 0, signsize);
+	    if (sObject == -1) {
+		fprintf(stderr, "-o required before -S\n");
+		exit(1);
+	    }
+
+	    ulValue = getnum(optarg, "Invalid signature buffer size");
+
+	    sign = malloc(sizeof(*sign));
+	    sign->data = malloc(ulValue);
+	    memset(sign->data, 0, ulValue);
+	    sign->size = ulValue;
+	    sign->object = sObject;
+	    sign->next = NULL;
+
+	    if (!sign_tail) {
+		sign_head = sign_tail = sign;
+	    } else {
+		sign_tail->next = sign;
+		sign_tail = sign;
+	    }
+
 	    break;
 	case 'n':
 #ifdef HAVE_SETPROGNAME
@@ -347,8 +385,23 @@ int main(int argc, char *argv[]) {
 	    slot = getnum(optarg, "Invalid slot number");
 	    break;
 	case 'S':
-	    signbuf = (unsigned char *) optarg;
-	    signsize = strlen(optarg);
+	    if (sObject == -1) {
+		fprintf(stderr, "-o required before -S\n");
+		exit(1);
+	    }
+	    sign = malloc(sizeof(*sign));
+	    sign->data = (unsigned char *) optarg;
+	    sign->size = strlen(optarg);
+	    sign->object = sObject;
+	    sign->next = NULL;
+
+	    if (!sign_tail) {
+		sign_head = sign_tail = sign;
+	    } else {
+		sign_tail->next = sign;
+		sign_tail = sign;
+	    }
+
 	    break;
 	case 'T':
 	    requiretoken = false;
@@ -581,6 +634,7 @@ int main(int argc, char *argv[]) {
     /*
      * If we are given a list of attributes to write out to a file, then
      * do that.
+     * If we were given a list of data to sign, do that.
      * If we are given an object class, then just find objects in that class.
      * If we are given an object, just extract that object's information.
      * Otherwise, find all objects.
@@ -588,47 +642,96 @@ int main(int argc, char *argv[]) {
 
     if (attr_head) {
 	for (attr = attr_head; attr != NULL; attr = attr->next)
-	    write_attrs(p11p, hSession, attr);
-    } else if (sObject != -1) {
-	dump_object_info(p11p, hSession, sObject, -1);
-    } else {
-	/*
-	 * If we were given a class, then use that as the search template.
-	 * Otherwise pass in an empty template
-	 */
+	    write_attrs(p11p, slot, hSession, attr);
+    }
 
-	size_t total = 0;
-	count = 0;
+    if (sign_head) {
+	for (sign = sign_head; sign != NULL; sign = sign->next) {
+	    CK_BYTE_PTR out = NULL;
+	    CK_ULONG outlen = 0;
+	    unsigned char *p;
 
-	if (cls != -1) {
-	    attrs[0].type = CKA_CLASS;
-	    attrs[0].pValue = &cls;
-	    attrs[0].ulValueLen = sizeof(cls);
-	    count = 1;
-	}
+	    rv = p11p->C_SignInit(hSession, &mech, sign->object);
 
-	rv = p11p->C_FindObjectsInit(hSession, attrs, count);
-
-	if (rv != CKR_OK) {
-	    fprintf(stderr, "C_FindObjectsInit failed (rv = %s)\n",
-		    getCKRName(rv));
-	    exit(1);
-	}
-
-	maxSize = 10;
-	phObject = malloc(maxSize * sizeof(CK_OBJECT_HANDLE_PTR));
-
-	do {
-	    rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
-
-	    for (i = 0; i < count; i++) {
-		dump_object_info(p11p, hSession, phObject[i], cls);
+	    if (rv != CKR_OK) {
+	    	fprintf(stderr, "C_SignInit failed (rv = %s)\n",
+			getCKRName(rv));
+		continue;
 	    }
 
-	    total += count;
-	} while (count > 0);
+	    rv = p11p->C_Sign(hSession, sign->data, sign->size, out, &outlen);
 
-	printf("%d objects found\n", (int) total);
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Sign failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    out = malloc(outlen);
+
+	    rv = p11p->C_Sign(hSession, sign->data, sign->size, out, &outlen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Sign failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    printf("Signature for \"%s\":\n", (char *) sign->data);
+
+	    printf("Signature size: %lu bytes, data = 0x", outlen);
+
+	    p = out;
+
+	    while (outlen-- > 0)
+		printf("%02x", (int) *p++);
+
+	    printf("\n");
+
+	    free(out);
+	}
+    }
+
+    if (!attr_head && !sign_head) {
+	if (sObject != -1) {
+	    dump_object_info(p11p, hSession, sObject, -1);
+	} else {
+	    /*
+	     * If we were given a class, then use that as the search template.
+	     * Otherwise pass in an empty template
+	     */
+
+	    size_t total = 0;
+	    count = 0;
+
+	    if (cls != -1) {
+		attrs[0].type = CKA_CLASS;
+		attrs[0].pValue = &cls;
+		attrs[0].ulValueLen = sizeof(cls);
+		count = 1;
+	    }
+
+	    rv = p11p->C_FindObjectsInit(hSession, attrs, count);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_FindObjectsInit failed (rv = %s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    maxSize = 10;
+	    phObject = malloc(maxSize * sizeof(CK_OBJECT_HANDLE_PTR));
+
+	    do {
+	        rv = p11p->C_FindObjects(hSession, phObject, maxSize, &count);
+
+		for (i = 0; i < count; i++) {
+			dump_object_info(p11p, hSession, phObject[i], cls);
+		}
+
+		total += count;
+	    } while (count > 0);
+
+	    printf("%d objects found\n", (int) total);
+	}
     }
 
 #if 0
@@ -1182,15 +1285,53 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
  */
 
 static void
-write_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
-	   CK_SESSION_HANDLE session, struct attr_list *ah)
+write_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
+	    CK_SESSION_HANDLE session, struct attr_list *ah)
 {
-    struct addr_list *attr;
+    struct attr_list *attr;
+    CK_ATTRIBUTE at_template;
+    CK_RV rv;
 
     for (attr = ah; attr != NULL; attr = attr->next) {
-	if (attr->object) {
+	if (attr->object != -1) {
 	    write_object_attr(p11p, slot, session, attr->object, attr);
 	} else {
+	    CK_OBJECT_HANDLE obj;
+	    CK_ULONG obj_count;
+	    at_template.type = CKA_CLASS;
+	    at_template.pValue = &attr->class;
+	    at_template.ulValueLen = sizeof(attr->class);
+	    rv = p11p->C_FindObjectsInit(session, &at_template, 1);
+	    if (rv != CKR_OK) {
+	    	fprintf(stderr, "C_FindObjectsInit failed (rv = %s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+
+	    for (;;) {
+		rv = p11p->C_FindObjects(session, &obj, 1, &obj_count);
+		if (rv != CKR_OK) {
+		    fprintf(stderr, "C_FindObjects failed (rv = %s)\n",
+			    getCKRName(rv));
+		    exit(1);
+		}
+
+		if (obj_count == 0)
+		    break;
+
+		write_object_attr(p11p, slot, session, obj, attr);
+	    }
+
+	    rv = p11p->C_FindObjectsFinal(session);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_FindObjectsFinal failed (rv = %s)\n",
+			getCKRName(rv));
+		exit(1);
+	    }
+	}
+    }
+}
 
 static void
 write_object_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
@@ -1215,14 +1356,14 @@ write_object_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
 
     rv = p11p->C_GetAttributeValue(session, obj, &at, 1);
     if (rv != CKR_OK) {
-	fprintf(stderr, "C_GetAttributeValue on &lu (%s) failed (rv = %s)\n",
+	fprintf(stderr, "C_GetAttributeValue on %lu (%s) failed (rv = %s)\n",
 		attr->attribute, getCKAName(attr->attribute), getCKRName(rv));
 	free(at.pValue);
 	return;
     }
 
     if (attr->template)
-	filename = gettemplate(attr->template, slot, object, attr->attribute);
+	filename = gettemplate(attr->template, slot, obj, attr->attribute);
     else
 	filename = attr->filename;
 
@@ -1244,19 +1385,68 @@ write_object_attr(CK_FUNCTION_LIST_PTR p11p, CK_SLOT_ID slot,
  * Process a template string
  */
 
+#define BUFRESIZE(str, p, len, size, add) \
+    do { \
+	if (len + add + 1 > size) { \
+	    size_t offset = p - str; \
+	    size += add + 64; \
+	    str = realloc(str, size); \
+	    p = str + offset; \
+	} \
+    } while (0)
+
 static char *
 gettemplate(const char *template, CK_SLOT_ID slot, CK_OBJECT_HANDLE obj,
 	    CK_ATTRIBUTE_TYPE attrib)
 {
     static char *retstr = NULL;
-    static size_t retlen = 0;
+    static size_t retsize = 0;
     int curlen = 0;
+    char *p = retstr, *tmp;
+    int tmplen;
 
     while (*template != '\0') {
-	switch (*template) {
-	case '%':
-	    template++;
+    	if (*template == '%') {
+	    tmp = NULL;
+	    switch (*++template) {
+	    case '%':
+		BUFRESIZE(retstr, p, curlen, retsize, 1);
+		*p++ = '%';
+		curlen++;
+		break;
+	    case 'o':
+		tmplen = asprintf(&tmp, "%d", (int) obj);
+		break;
+	    case 'a':
+		tmplen = asprintf(&tmp, "%d", (int) attrib);
+		break;
+	    case 's':
+		tmplen = asprintf(&tmp, "%d", (int) slot);
+		break;
+	    default:
+		fprintf(stderr, "Unknown template character: %c\n", *template);
+		exit(1);
+		break;
+	    }
+	    if (tmp != NULL) {
+		BUFRESIZE(retstr, p, curlen, retsize, tmplen);
+		strcpy(p, tmp);
+		free(tmp);
+		p += tmplen;
+		curlen += tmplen;
+	    }
+	} else {
+	    BUFRESIZE(retstr, p, curlen, retsize, 1);
+	    *p++ = *template;
+	    curlen++;
+	}
+	template++;
+    }
+
+    *p = '\0';
+    return retstr;
 }
+
 /*
  * Dump out interesting attributes for an object.
  */
