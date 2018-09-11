@@ -590,7 +590,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 		   sizeof(slot_info->manufacturerID), "%s",
 		   "U.S. Naval Research Lab");
 
-	slot_info->flags = CKF_HW_SLOT;
+	slot_info->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
 
 	LOCK_MUTEX(id_mutex);
 	if (id_list_count > 0)
