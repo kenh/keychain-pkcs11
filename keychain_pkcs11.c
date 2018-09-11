@@ -134,7 +134,6 @@ struct id_info {
 	SecKeyRef		privkey;
 	SecKeyRef		pubkey;
 	CK_KEY_TYPE		keytype;
-	void *			lacontext;
 	SecAccessControlRef	secaccess;
 	char *			label;
 	bool			privcansign;
@@ -149,12 +148,57 @@ static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
 static bool id_list_init = false;
 static bool have_slot = false;			/* True if we have a slot */
 static bool ask_pin = false;			/* Should we ask for a PIN? */
+static bool logged_in = false;			/* Are we logged into card? */
+static void *lacontext = NULL;			/* LocalAuth context */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
+static void token_logout(void);
+
+/*
+ * Our object list and the functions to handle them
+ *
+ * The object types we support are:
+ *
+ * Certificates (CKO_CERTFICATE).  We only support X.509 certificates
+ * Public keys (CKO_PUBLIC_KEY).
+ * Private keys (CKO_PRIVATE_KEY).
+ *
+ * The general rule is the CKA_ID attribute for any of those should all
+ * match for a given identity.  I implemented this so the CKA_ID
+ * is a CK_ULONG that is an index into our identity array.  This is
+ * arbitrary; we could just match on any byte string.
+ *
+ * Previously I had implemented each object list as part of a session, but
+ * really the object space is per-token, so I changed the implementation to
+ * be global (since right now the Security framework only supports one token).
+ *
+ * Since the object list contains pointers into the id list, we are using
+ * the id mutex to lock the object list as well.
+ */
+
+struct obj_info {
+	unsigned int		id_index;
+	unsigned char		id_value[sizeof(CK_ULONG)];
+	CK_OBJECT_CLASS		class;
+	CK_ATTRIBUTE_PTR	attrs;
+	unsigned int		attr_count;
+	unsigned int		attr_size;
+};
+
+#define LOG_DEBUG_OBJECT(obj, se) \
+	os_log_debug(logsys, "Object %lu (%s)", obj, \
+		     getCKOName(se->obj_list[obj].class));
+
+static void build_objects(int);
+static void obj_free(struct obj_info **, unsigned int *, unsigned int *);
+
+static struct obj_info *id_obj_list = NULL;	/* Identity object list */
+static unsigned int id_obj_count = 0;		/* Identity object list count */
+static unsigned int id_obj_size = 0;		/* Size of identity obj_list */
 
 /*
  * Our session information.  Anything that modifies a session will need to
@@ -171,13 +215,11 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 
 struct session {
 	kc_mutex 	mutex;			/* Session mutex */
-	struct obj_info *obj_list;		/* Objects list */
-	unsigned int	obj_list_count;		/* Object list count */
-	unsigned int	obj_list_size;		/* Size of obj_list */
+	struct obj_info *obj_list;		/* Pointer to object list */
+	unsigned int	obj_list_count;		/* Copy of object count */
 	unsigned int	obj_search_index;	/* Current search index */
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
-	bool		logged_in;		/* Session is logged in */
 	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
 	SecKeyRef	sig_key;		/* Key for signing */
 	size_t		sig_size;		/* Size of sig, 0 is unknown */
@@ -209,38 +251,6 @@ do { \
 	var = sess_list[session]; \
 	UNLOCK_MUTEX(sess_mutex); \
 } while (0)
-
-/*
- * Our object list and the functions to handle them
- *
- * The object types we support are:
- *
- * Certificates (CKO_CERTFICATE).  We only support X.509 certificates
- * Public keys (CKO_PUBLIC_KEY).
- * Private keys (CKO_PRIVATE_KEY).
- * 
- * The general rule is the CKA_ID attribute for any of those should all
- * match for a given identity.  I implemented this so the CKA_ID
- * is a CK_ULONG that is an index into our identity array.  This is
- * arbitrary; we could just match on any byte string.
- */
-
-struct obj_info {
-	unsigned int		id_index;
-	unsigned char		id_value[sizeof(CK_ULONG)];
-	CK_OBJECT_CLASS		class;
-	CK_ATTRIBUTE_PTR	attrs;
-	unsigned int		attr_count;
-	unsigned int		attr_size;
-};
-
-#define LOG_DEBUG_OBJECT(obj, se) \
-	os_log_debug(logsys, "Object %lu (%s)", obj, \
-		     getCKOName(se->obj_list[obj].class));
-
-static void build_objects(struct session *, int);
-static void obj_free(struct obj_info *, unsigned int);
-
 /*
  * Our attribute list used for searching
  */
@@ -449,7 +459,11 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
 
+	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
 	id_list_free();
+	lacontext_free(lacontext);
+	lacontext = NULL;
+	logged_in = false;
 
 	UNLOCK_MUTEX(sess_mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -815,12 +829,10 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 
 	sess = malloc(sizeof(*sess));
 	CREATE_MUTEX(sess->mutex);
-	sess->obj_list = NULL;
-	sess->obj_list_count = 0;
-	sess->obj_list_size = 0;
+	sess->obj_list = id_obj_list;
+	sess->obj_list_count = id_obj_count;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
-	sess->logged_in = false;
 	sess->sig_key = NULL;
 	sess->ver_key = NULL;
 
@@ -861,6 +873,7 @@ out:
 CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 {
 	struct session *se;
+	int i;
 
 	FUNCINITCHK(C_CloseSession);
 
@@ -868,13 +881,22 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
 
 	sess_free(se);
 
 	sess_list[session] = NULL;
 
+	for (i = 0; i < sess_list_count; i++)
+		if (sess_list[i] != NULL)
+			goto cont;
+
+	token_logout();
+
+cont:
 	UNLOCK_MUTEX(sess_mutex);
+	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_CloseSession, CKR_OK);
 }
@@ -883,9 +905,12 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 {
 	CHECKSLOT(slot_id);
 
+	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
 	sess_list_free();
+	token_logout();
 	UNLOCK_MUTEX(sess_mutex);
+	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_CloseAllSessions, CKR_OK);
 }
@@ -909,7 +934,7 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
 	session_info->slotID = KEYCHAIN_SLOT;
-	session_info->state = se->logged_in ? CKS_RO_USER_FUNCTIONS :
+	session_info->state = logged_in ? CKS_RO_USER_FUNCTIONS :
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
 	session_info->ulDeviceError = 0;
@@ -957,8 +982,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 			usage = id_list[i].privcansign ? USAGE_SIGN :
 								USAGE_DECRYPT;
 
-			if ((rv = lacontext_auth(id_list[i].lacontext, pin,
-						 pinlen,
+			if ((rv = lacontext_auth(lacontext, pin, pinlen,
 						 id_list[i].secaccess,
 						 usage)) != CKR_OK) {
 				/*
@@ -972,7 +996,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		os_log_debug(logsys, "We are NOT setting the PIN");
 	}
 
-	se->logged_in = true;
+	logged_in = true;
 
 out:
 	UNLOCK_MUTEX(se->mutex);
@@ -988,7 +1012,6 @@ out:
 CK_RV C_Logout(CK_SESSION_HANDLE session)
 {
 	struct session *se;
-	int i;
 	FUNCINITCHK(C_Logout);
 
 	os_log_debug(logsys, "session = %d", (int) session);
@@ -998,16 +1021,7 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	/*
-	 * Log out from all identities
-	 */
-
-	for (i = 0; i < id_list_count; i++) {
-		os_log_debug(logsys, "Logging out of identity %d", i);
-		lacontext_logout(id_list[i].lacontext);
-	}
-
-	se->logged_in = false;
+	token_logout();
 
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -1042,9 +1056,6 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 	LOCK_MUTEX(se->mutex);
 
 	object--;
-
-	if (se->obj_list_count == 0)
-		build_objects(se, 1);
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
@@ -1112,9 +1123,6 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 	CHECKSESSION(session, se);
 
 	LOCK_MUTEX(se->mutex);
-
-	if (se->obj_list_count == 0)
-		build_objects(se, 1);
 
 	se->obj_search_index = 0;
 
@@ -1253,9 +1261,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	LOCK_MUTEX(se->mutex);
 
 	object--;
-
-	if (se->obj_list_count == 0)
-		build_objects(se, 0);
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
@@ -1623,10 +1628,16 @@ scan_identities(void)
 	};
 
 	/*
-	 * Clear out all previous identity entries
+	 * Clear out all previous identity entries and object tree
 	 */
 
+	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
 	id_list_free();
+
+	if (lacontext != NULL)
+		lacontext_free(lacontext);
+
+	lacontext = lacontext_new();
 
 	/*
 	 * Create the query dictionary for SecCopyItemMatching(); see above
@@ -1700,6 +1711,13 @@ scan_identities(void)
 
 	ret = 0;
 	id_list_init = true;
+
+	/*
+	 * Rebuild our object tree since we've finished the identity scan
+	 */
+
+	build_objects(0);
+
 out:
 	CFRelease(result);
 	return ret;
@@ -1795,7 +1813,6 @@ add_identity(CFDictionaryRef dict)
 	id_list[i].privkey = NULL;
 	id_list[i].pubkey = NULL;
 	id_list[i].label = NULL;
-	id_list[i].lacontext = NULL;
 	id_list[i].secaccess = NULL;
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
@@ -1805,15 +1822,13 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	/*
-	 * Get a new LAContext and feed it into the query using the
+	 * Use our shared LAContext and feed it into the query using the
 	 * kSecUseAuthenticationContext key.  We also feed in the persistent
 	 * reference to extract the REAL identity reference (SecIdentityRef).
 	 * This will attach the LAContext to the identity.
 	 */
 
-	id_list[i].lacontext = lacontext_new();
-
-	values[AUTHC_INDEX] = id_list[i].lacontext;
+	values[AUTHC_INDEX] = lacontext;
 	values[P_REF_INDEX] = p_ref;
 
 	refquery = CFDictionaryCreate(NULL, keys, values,
@@ -2103,8 +2118,6 @@ id_list_free(void)
 			CFRelease(id_list[i].pubkey);
 		if (id_list[i].cert)
 			CFRelease(id_list[i].cert);
-		if (id_list[i].lacontext)
-			lacontext_free(id_list[i].lacontext);
 		if (id_list[i].secaccess)
 			CFRelease(id_list[i].secaccess);
 	}
@@ -2296,34 +2309,34 @@ convert_keytype(CFNumberRef type)
 do { \
 	void *p = malloc(size); \
 	memcpy(p, var, size); \
-	if (se->obj_list[se->obj_list_count].attr_count >= \
-	    se->obj_list[se->obj_list_count].attr_size) { \
-		se->obj_list[se->obj_list_count].attr_size += 5; \
-		se->obj_list[se->obj_list_count].attrs = realloc(se->obj_list[se->obj_list_count].attrs, \
-			se->obj_list[se->obj_list_count].attr_size * sizeof(CK_ATTRIBUTE)); \
+	if (id_obj_list[id_obj_count].attr_count >= \
+	    id_obj_list[id_obj_count].attr_size) { \
+		id_obj_list[id_obj_count].attr_size += 5; \
+		id_obj_list[id_obj_count].attrs = realloc(id_obj_list[id_obj_count].attrs, \
+			id_obj_list[id_obj_count].attr_size * sizeof(CK_ATTRIBUTE)); \
 	} \
-	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].type = attribute; \
-	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].pValue = p; \
-	se->obj_list[se->obj_list_count].attrs[se->obj_list[se->obj_list_count].attr_count].ulValueLen = size; \
-	se->obj_list[se->obj_list_count].attr_count++; \
+	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].type = attribute; \
+	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].pValue = p; \
+	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].ulValueLen = size; \
+	id_obj_list[id_obj_count].attr_count++; \
 } while (0)
 
 #define ADD_ATTR(attr, var) ADD_ATTR_SIZE(attr, &var, sizeof(var))
 
 #define NEW_OBJECT() \
 do { \
-	if (++se->obj_list_count >= se->obj_list_size) { \
-		se->obj_list_size += 5; \
-		se->obj_list = realloc(se->obj_list, se->obj_list_size * sizeof(*se->obj_list)); \
+	if (++id_obj_count >= id_obj_size) { \
+		id_obj_size += 5; \
+		id_obj_list = realloc(id_obj_list, id_obj_size * sizeof(*id_obj_list)); \
 	} \
 } while (0)
 
 /*
- * Build up a list of objects valid for this session.
+ * Build up a list of objects based on our identity list
  */
 
 static void
-build_objects(struct session *se, int lock)
+build_objects(int lock)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
@@ -2338,7 +2351,7 @@ build_objects(struct session *se, int lock)
 	if (id_list_count > 0) {
 		/* Prime the pump */
 		NEW_OBJECT();
-		se->obj_list_count--;
+		id_obj_count--;
 	}
 
 	for (i = 0; i < id_list_count; i++) {
@@ -2347,10 +2360,10 @@ build_objects(struct session *se, int lock)
 
 #define OBJINIT() \
 do { \
-	se->obj_list[se->obj_list_count].id_index = i; \
-	se->obj_list[se->obj_list_count].attrs = NULL; \
-	se->obj_list[se->obj_list_count].attr_count = 0; \
-	se->obj_list[se->obj_list_count].attr_size = 0; \
+	id_obj_list[id_obj_count].id_index = i; \
+	id_obj_list[id_obj_count].attrs = NULL; \
+	id_obj_list[id_obj_count].attr_count = 0; \
+	id_obj_list[id_obj_count].attr_size = 0; \
 } while (0)
 
 		OBJINIT();
@@ -2362,7 +2375,7 @@ do { \
 
 		t = i;
 		cl = CKO_CERTIFICATE;
-		se->obj_list[se->obj_list_count].class = cl;
+		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
@@ -2391,7 +2404,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PUBLIC_KEY;
-		se->obj_list[se->obj_list_count].class = cl;
+		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
@@ -2409,7 +2422,7 @@ do { \
 		OBJINIT();
 
 		cl = CKO_PRIVATE_KEY;
-		se->obj_list[se->obj_list_count].class = cl;
+		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(CKA_CLASS, cl);
 		ADD_ATTR(CKA_ID, t);
 		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
@@ -2441,17 +2454,20 @@ do { \
  */
 
 static void
-obj_free(struct obj_info *obj, unsigned int count)
+obj_free(struct obj_info **obj, unsigned int *count, unsigned int *size)
 {
 	int i, j;
 
-	for (i = 0; i < count; i++) {
-		for (j = 0; j < obj[i].attr_count; j++)
-			free(obj[i].attrs[j].pValue);
-		free(obj[i].attrs);
+	for (i = 0; i < *count; i++) {
+		for (j = 0; j < (*obj)[i].attr_count; j++)
+			free((*obj)[i].attrs[j].pValue);
+		free((*obj)[i].attrs);
 	}
 
-	free(obj);
+	free(*obj);
+
+	*obj = NULL;
+	*count = *size = 0;
 }
 
 /*
@@ -2619,8 +2635,6 @@ sess_free(struct session *se)
 
 	LOCK_MUTEX(se->mutex);
 
-	obj_free(se->obj_list, se->obj_list_count);
-
 	for (i = 0; i < se->search_attrs_count; i++)
 		free(se->search_attrs[i].pValue);
 
@@ -2655,4 +2669,21 @@ sess_list_free(void)
 	free(sess_list);
 
 	sess_list = NULL;
+}
+
+/*
+ * Logout from our token
+ */
+
+static void
+token_logout(void)
+{
+	/*
+	 * Log out from all identities; since we now share a lacontext
+	 * across identities, we only need to do this once.
+	 */
+
+	lacontext_logout(lacontext);
+
+	logged_in = false;
 }
