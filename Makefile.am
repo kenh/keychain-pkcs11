@@ -11,6 +11,7 @@ ACLOCAL_AMFLAGS = -I m4
 AM_CFLAGS = -Wall
 
 lib_LTLIBRARIES = keychain-pkcs11.la
+dist_man8_MANS = keychain-pkcs11.man
 check_PROGRAMS = pkcs11_test
 
 keychain_pkcs11_la_SOURCES = \
@@ -37,8 +38,26 @@ keychain_pkcs11_la_LDFLAGS = \
 			-framework Security \
 			-framework LocalAuthentication \
 			#
+##
+## For reasons I do not understand, on MacOS X libtool creates a ".so"
+## file if you specify -module, instead of a .dylib.  Create a symbolic
+## link in the installation directory so programs that want a .dylib will
+## work
+
+install-exec-hook:
+	cd $(DESTDIR)$(libdir) && \
+		rm -f keychain-pkcs11.dylib && \
+		$(LN_S) keychain-pkcs11.so keychain-pkcs11.dylib
+
+uninstall-hook:
+	rm -f $(DESTDIR)$(libdir)/keychain-pkcs11.dylib
+
+##
+## Sources for our test program; only built by "make check"
+##
 
 pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h
+
 ##
 ## We add this here so debug.c will be compiled with a different object
 ## name and not conflict with the use of debug.c in the shared library.

@@ -1,0 +1,15 @@
+.Dd September 12, 2018
+.Dt KEYCHAIN-PKCS11 8
+.Os Darwin
+.Sh NAME
+.Nm keychain-pkcs11.dylib
+.Nd PKCS#11 bridge library
+.Sh DESCRIPTION
+The keychain-pkcs11.dylib library is used to provide a PKCS#11 API
+for the SmartCard services provided by the Security Framework.  This
+provides a way for programs that can use the PKCS#11 API to access
+smartcards using the native support on OS X (High Sierra and newer).
+.Sh SEE ALSO
+.Xr sc_auth 8 ,
+.Xr security 1 ,
+.Xr SmartCardServices 7

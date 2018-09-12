@@ -12,6 +12,7 @@ AM_INIT_AUTOMAKE([-Wall foreign subdir-objects 1.12])
 AM_PROG_CC_C_O
 AM_PROG_AR
 AC_PROG_OBJC
+AC_PROG_LN_S
 
 LT_PREREQ([2.4.6])
 LT_INIT([disable-static dlopen])
