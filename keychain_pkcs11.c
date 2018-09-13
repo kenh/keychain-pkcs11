@@ -225,6 +225,9 @@ struct session {
 	size_t		sig_size;		/* Size of sig, 0 is unknown */
 	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
 	SecKeyRef	ver_key;		/* Verify key */
+	SecKeyAlgorithm enc_alg;		/* Encryption algorithm */
+	SecKeyRef	enc_key;		/* Encryption key */
+	size_t		enc_size;		/* Size of enc, 0 is unknown */
 };
 
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
@@ -835,6 +838,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->search_attrs_count = 0;
 	sess->sig_key = NULL;
 	sess->ver_key = NULL;
+	sess->enc_key = NULL;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1154,8 +1158,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 }
 
 /*
- * Return object identifiers that match our search template.  Right now we
- * ignore the session handle, but we'll fix that later.
+ * Return object identifiers that match our search template.
  */
 
 CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
@@ -1224,8 +1227,163 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE session)
 	RET(C_FindObjectsFinal, CKR_OK);
 }
 
-NOTSUPPORTED(C_EncryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
-NOTSUPPORTED(C_Encrypt, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR outdata, CK_ULONG_PTR outdatalen))
+CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
+		    CK_OBJECT_HANDLE object)
+{
+	struct session *se;
+	int i;
+
+	FUNCINITCHK(C_EncryptInit);
+
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(se->mutex);
+
+	if (! mech) {
+		os_log_debug(logsys, "mechanism pointer is NULL");
+		RET(C_EncryptInit, CKR_MECHANISM_INVALID);
+	}
+
+	os_log_debug(logsys, "session = %d, mech = %d, key = %d",
+		     (int) session, (int) mech->mechanism, (int) object);
+
+	object--;
+
+	if (object >= se->obj_list_count) {
+		UNLOCK_MUTEX(se->mutex);
+		RET(C_SignInit, CKR_KEY_HANDLE_INVALID);
+	}
+
+	/*
+	 * Right now we assume only a public key can perform encryption
+	 */
+
+	if (se->obj_list[object].class != CKO_PUBLIC_KEY) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_EncryptInit, CKR_KEY_TYPE_INCONSISTENT);
+	}
+
+	/*
+	 * Map our mechanism onto what we need for signing
+	 */
+
+	for (i = 0; i < keychain_mechmap_size; i++) {
+		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
+			if (se->enc_key)
+				CFRelease(se->enc_key);
+			se->enc_key =
+				id_list[se->obj_list[object].id_index].pubkey;
+			CFRetain(se->enc_key);
+			se->enc_alg = *keychain_mechmap[i].sec_encmech;
+			if (keychain_mechmap[i].blocksize_out) {
+				se->enc_size = SecKeyGetBlockSize(se->enc_key);
+			} else {
+				se->enc_size = 0;
+			}
+
+			UNLOCK_MUTEX(se->mutex);
+			UNLOCK_MUTEX(id_mutex);
+			RET(C_EncryptInit, CKR_OK);
+		}
+	}
+
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_EncryptInit, CKR_MECHANISM_INVALID);
+}
+
+CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
+		CK_ULONG indatalen, CK_BYTE_PTR outdata,
+		CK_ULONG_PTR outdatalen)
+{
+	struct session *se;
+	CFDataRef inref, outref;
+	CFErrorRef err;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_Encrypt);
+
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
+		     "outdata = %p, outlen = %d", (int) session, indata,
+		     (int) indatalen, outdata, (int) *outdatalen);
+
+	/*
+	 * If we know our mechanism output size, check first to see if the
+	 * output buffer is big enough.  Also, short-circuit this test if
+	 * outdata is NULL.
+	 */
+
+	if (! outdata) {
+		if (! se->enc_size) {
+			/* Hmm, what to do here?  No idea! */
+			UNLOCK_MUTEX(se->mutex);
+			UNLOCK_MUTEX(id_mutex);
+			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
+		}
+		*outdatalen = se->enc_size;
+		os_log_debug(logsys, "outdata is NULL, returning an output "
+			     "size of %d", (int) se->enc_size);
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_Encrypt, CKR_OK);
+	}
+
+	if (se->enc_size && se->enc_size > *outdatalen) {
+		os_log_debug(logsys, "Output size is %d, but our output "
+			     "buffer is %d", (int) se->enc_size,
+			     (int) *outdatalen);
+		*outdatalen = se->enc_size;
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
+	}
+
+	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
+					    kCFAllocatorNull);
+
+	outref = SecKeyCreateEncryptedData(se->enc_key, se->enc_alg, inref,
+					   &err);
+
+	CFRelease(inref);
+
+	if (! outref) {
+		os_log_debug(logsys, "SecKeyCreateEncryptedData failed: "
+			     "%{public}@ (%ld)", err,
+			     (long) CFErrorGetCode(err));
+		CFRelease(err);
+		RET(C_Encrypt, CKR_GENERAL_ERROR);
+	}
+
+	if (*outdatalen < CFDataGetLength(outref)) {
+		rv = CKR_BUFFER_TOO_SMALL;
+	} else {
+		memcpy(outdata, CFDataGetBytePtr(outref),
+		       CFDataGetLength(outref));
+		/*
+		 * If the encryption was successful, release our key reference
+		 */
+		CFRelease(se->enc_key);
+		se->sig_key = NULL;
+		se->sig_size = 0;
+	}
+
+	*outdatalen = CFDataGetLength(outref);
+
+	CFRelease(outref);
+
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_Encrypt, rv);
+}
+
 NOTSUPPORTED(C_EncryptUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR inpart, CK_ULONG inpartlen, CK_BYTE_PTR outpart, CK_ULONG_PTR outpartlen))
 NOTSUPPORTED(C_EncryptFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR lastpart, CK_ULONG_PTR lastpartlen))
 NOTSUPPORTED(C_DecryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
@@ -1307,9 +1465,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		}
 	}
 
-	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
-
 	RET(C_SignInit, CKR_MECHANISM_INVALID);
 }
 
@@ -1354,8 +1509,24 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 
 	/*
 	 * If we know our mechanism output size, check first to see if the
-	 * output buffer is big enough.
+	 * output buffer is big enough.  Also, short-circuit this test if
+	 * sig is NULL.
 	 */
+
+	if (! sig) {
+		if (! se->sig_size) {
+			/* Hmm, what to do here?  No idea! */
+			UNLOCK_MUTEX(se->mutex);
+			UNLOCK_MUTEX(id_mutex);
+			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
+		}
+		*siglen = se->sig_size;
+		os_log_debug(logsys, "sig is NULL, returning an output "
+			     "size of %d", (int) se->sig_size);
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_Sign, CKR_OK);
+	}
 
 	if (se->sig_size && se->sig_size > *siglen) {
 		os_log_debug(logsys, "Output size is %d, but our output "
@@ -1363,7 +1534,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		*siglen = se->sig_size;
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
-		RET(C_Sign, sig == NULL ? CKR_OK : CKR_BUFFER_TOO_SMALL);
+		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
 	}
 
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
@@ -1372,8 +1543,6 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	outref = SecKeyCreateSignature(se->sig_key, se->sig_alg, inref, &err);
 
 	CFRelease(inref);
-	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	if (! outref) {
 		os_log_debug(logsys, "SecKeyCreateSignature failed: "
@@ -1397,6 +1566,9 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	*siglen = CFDataGetLength(outref);
 
 	CFRelease(outref);
+
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
 
 #if KEYCHAIN_DEBUG
 	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_SIGFILE"))) {
@@ -2645,6 +2817,9 @@ sess_free(struct session *se)
 
 	if (se->ver_key)
 		CFRelease(se->ver_key);
+
+	if (se->enc_key)
+		CFRelease(se->enc_key);
 
 	UNLOCK_MUTEX(se->mutex);
 	DESTROY_MUTEX(se->mutex);

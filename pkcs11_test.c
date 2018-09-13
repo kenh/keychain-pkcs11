@@ -210,14 +210,14 @@ struct attr_list {
 #define LIBRARY_NAME ".libs/keychain-pkcs11.so"
 
 /*
- * Linked list of signing data
+ * Linked list of data to perform operation on
  */
 
-struct sign_list {
+struct op_list {
     unsigned char	*data;
     size_t		size;
     CK_OBJECT_HANDLE	object;
-    struct sign_list	*next;
+    struct op_list	*next;
 };
 
 /*
@@ -237,6 +237,8 @@ usage(const char *progname)
     		    "with -F)\n");
     fprintf(stderr, "\t-c class\tNumeric class of objects to select; \n");
     fprintf(stderr, "\t\t\tdefault is to apply to all objects\n");
+    fprintf(stderr, "\t-E encdata\tData to encrypt, requires -o, ");
+    fprintf(stderr, "may be repeated\n");
     fprintf(stderr, "\t-f file\t\tFile to dump attribute data to\n");
     fprintf(stderr, "\t-F template\tFilename template to dump file data;\n");
     fprintf(stderr, "\t\t\tfilename template supports the following items:\n");
@@ -299,7 +301,8 @@ int main(int argc, char *argv[]) {
     const char *attr_filename = NULL;
     const char *attr_filetemplate = NULL;
 
-    struct sign_list *sign_head = NULL, *sign_tail = NULL, *sign;
+    struct op_list *sign_head = NULL, *sign_tail = NULL, *sign;
+    struct op_list *enc_head = NULL, *enc_tail = NULL, *enc;
 
     bool sleepatexit = false;
     bool tokenlogin = true;
@@ -309,7 +312,7 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:E:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -341,6 +344,25 @@ int main(int argc, char *argv[]) {
 	case 'c':
 	    cls = getnum(optarg, "Invalid object class number");
 	    sObject = -1;
+	    break;
+	case 'E':
+	    if (sObject == -1) {
+		fprintf(stderr, "-o required before -E\n");
+		exit(1);
+	    }
+	    enc = malloc(sizeof(*enc));
+	    enc->data = (unsigned char *) optarg;
+	    enc->size = strlen(optarg);
+	    enc->object = sObject;
+	    enc->next = NULL;
+
+	    if (!enc_tail) {
+		enc_head = enc_tail = enc;
+	    } else {
+		enc_tail->next = enc;
+		enc_tail = enc;
+	    }
+
 	    break;
 	case 'f':
 	    attr_filename = optarg;
@@ -634,7 +656,7 @@ int main(int argc, char *argv[]) {
     /*
      * If we are given a list of attributes to write out to a file, then
      * do that.
-     * If we were given a list of data to sign, do that.
+     * If we were given a list of data to sign or encrypt, do that.
      * If we are given an object class, then just find objects in that class.
      * If we are given an object, just extract that object's information.
      * Otherwise, find all objects.
@@ -690,7 +712,52 @@ int main(int argc, char *argv[]) {
 	}
     }
 
-    if (!attr_head && !sign_head) {
+    if (enc_head) {
+	for (enc = enc_head; enc != NULL; enc = enc->next) {
+	    CK_BYTE_PTR out = NULL;
+	    CK_ULONG outlen = 0;
+	    unsigned char *p;
+
+	    rv = p11p->C_EncryptInit(hSession, &mech, enc->object);
+
+	    if (rv != CKR_OK) {
+	    	fprintf(stderr, "C_EncryptInit failed (rv = %s)\n",
+			getCKRName(rv));
+		continue;
+	    }
+
+	    rv = p11p->C_Encrypt(hSession, enc->data, enc->size, out, &outlen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Encrypt failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    out = malloc(outlen);
+
+	    rv = p11p->C_Encrypt(hSession, enc->data, enc->size, out, &outlen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Encrypt failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    printf("Encrypted output for \"%s\":\n", (char *) enc->data);
+
+	    printf("Encrypted data: %lu bytes, data = 0x", outlen);
+
+	    p = out;
+
+	    while (outlen-- > 0)
+		printf("%02x", (int) *p++);
+
+	    printf("\n");
+
+	    free(out);
+	}
+    }
+
+    if (!attr_head && !sign_head && !enc_head) {
 	if (sObject != -1) {
 	    dump_object_info(p11p, hSession, sObject, -1);
 	} else {
