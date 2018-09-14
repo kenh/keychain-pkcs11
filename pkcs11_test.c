@@ -237,6 +237,8 @@ usage(const char *progname)
     		    "with -F)\n");
     fprintf(stderr, "\t-c class\tNumeric class of objects to select; \n");
     fprintf(stderr, "\t\t\tdefault is to apply to all objects\n");
+    fprintf(stderr, "\t-D filename\tData to decrypt, requires -o, ");
+    fprintf(stderr, "may be repeated");
     fprintf(stderr, "\t-E encdata\tData to encrypt, requires -o, ");
     fprintf(stderr, "may be repeated\n");
     fprintf(stderr, "\t-f file\t\tFile to dump attribute data to\n");
@@ -303,6 +305,7 @@ int main(int argc, char *argv[]) {
 
     struct op_list *sign_head = NULL, *sign_tail = NULL, *sign;
     struct op_list *enc_head = NULL, *enc_tail = NULL, *enc;
+    struct op_list *dec_head = NULL, *dec_tail = NULL, *dec;
 
     bool sleepatexit = false;
     bool tokenlogin = true;
@@ -312,7 +315,7 @@ int main(int argc, char *argv[]) {
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:E:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:D:E:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -344,6 +347,24 @@ int main(int argc, char *argv[]) {
 	case 'c':
 	    cls = getnum(optarg, "Invalid object class number");
 	    sObject = -1;
+	    break;
+	case 'D':
+	    if (sObject == -1) {
+		fprintf(stderr, "-o required before -D\n");
+		exit(1);
+	    }
+	    dec = malloc(sizeof(*dec));
+	    dec->data = (unsigned char *) optarg;
+	    dec->object = sObject;
+	    dec->next = NULL;
+
+	    if (!dec_tail) {
+		dec_head = dec_tail = dec;
+	    } else {
+		dec_tail->next = dec;
+		dec_tail = dec;
+	    }
+
 	    break;
 	case 'E':
 	    if (sObject == -1) {
@@ -757,7 +778,47 @@ int main(int argc, char *argv[]) {
 	}
     }
 
-    if (!attr_head && !sign_head && !enc_head) {
+    if (dec_head) {
+	for (dec = dec_head; dec != NULL; dec = dec->next) {
+	    CK_BYTE_PTR out = NULL;
+	    CK_ULONG outlen = 0;
+	    unsigned char *p;
+	    size_t inlen;
+
+	    getdata((char *) dec->data, &p, &inlen);
+
+	    rv = p11p->C_DecryptInit(hSession, &mech, dec->object);
+
+	    if (rv != CKR_OK) {
+	    	fprintf(stderr, "C_DecryptInit failed (rv = %s)\n",
+			getCKRName(rv));
+		continue;
+	    }
+
+	    rv = p11p->C_Decrypt(hSession, p, inlen, out, &outlen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Decrypt failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    out = malloc(outlen);
+
+	    rv = p11p->C_Decrypt(hSession, p, inlen, out, &outlen);
+
+	    if (rv != CKR_OK) {
+		fprintf(stderr, "C_Decrypt failed (rv = %s)\n", getCKRName(rv));
+		continue;
+	    }
+
+	    printf("Encrypted data: %.*s\n", (int) outlen, out);
+
+	    free(p);
+	    free(out);
+	}
+    }
+
+    if (!attr_head && !sign_head && !enc_head && !dec_head) {
 	if (sObject != -1) {
 	    dump_object_info(p11p, hSession, sObject, -1);
 	} else {
