@@ -238,7 +238,7 @@ usage(const char *progname)
     fprintf(stderr, "\t-c class\tNumeric class of objects to select; \n");
     fprintf(stderr, "\t\t\tdefault is to apply to all objects\n");
     fprintf(stderr, "\t-D filename\tData to decrypt, requires -o, ");
-    fprintf(stderr, "may be repeated");
+    fprintf(stderr, "may be repeated\n");
     fprintf(stderr, "\t-E encdata\tData to encrypt, requires -o, ");
     fprintf(stderr, "may be repeated\n");
     fprintf(stderr, "\t-f file\t\tFile to dump attribute data to\n");
@@ -651,7 +651,9 @@ int main(int argc, char *argv[]) {
     if (rv == CKR_OK) {
         printf("Session slot: %d\n", (int) sessionInfo.slotID);
         printf("Session state: %s\n", getCKSName(sessionInfo.state));
-        printf("Session flags: %d\n", (int) sessionInfo.flags);
+        printf("Session flags: ");
+	flags_dump(sessionflags, sessionInfo.flags);
+	printf("\n");
         printf("Session device errors: %d\n", (int) sessionInfo.ulDeviceError);
     } else {
         fprintf(stderr, "Unable to get session info (rv = %s)\n", getCKRName(rv));
