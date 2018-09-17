@@ -129,23 +129,23 @@ static kc_mutex sess_mutex;
  */
 
 struct id_info {
-	SecIdentityRef		ident;
-	SecCertificateRef	cert;
-	SecKeyRef		privkey;
-	SecKeyRef		pubkey;
-	CK_KEY_TYPE		keytype;
-	SecAccessControlRef	secaccess;
-	char *			label;
-	bool			privcansign;
-	bool			privcandecrypt;
-	bool			pubcanverify;
-	bool			pubcanencrypt;
+	SecIdentityRef		ident;		/* Identity reference */
+	SecCertificateRef	cert;		/* Identity certificate */
+	SecKeyRef		privkey;	/* Identity private key */
+	SecKeyRef		pubkey;		/* Identity public key */
+	CFDataRef		pkeyhash;	/* Public key hash */
+	CK_KEY_TYPE		keytype;	/* Key type */
+	SecAccessControlRef	secaccess;	/* Access control reference */
+	char *			label;		/* Printable label for id */
+	bool			privcansign;	/* Can privkey sign data? */
+	bool			privcandecrypt;	/* Can privkey decrypt? */
+	bool			pubcanverify;	/* Can pubkey verify? */
+	bool			pubcanencrypt;	/* Can pubkey encrypt? */
 };
 
 static struct id_info *id_list = NULL;
 static unsigned int id_list_count = 0;		/* Number of valid entries */
 static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
-static bool id_list_init = false;
 static bool have_slot = false;			/* True if we have a slot */
 static bool ask_pin = false;			/* Should we ask for a PIN? */
 static bool logged_in = false;			/* Are we logged into card? */
@@ -154,6 +154,8 @@ static void *lacontext = NULL;			/* LocalAuth context */
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
+static unsigned int cflistcount(CFTypeRef);	/* Count of list entries */
+static CFDictionaryRef cfgetindex(CFTypeRef);	/* Entry in list */
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
@@ -1916,6 +1918,7 @@ static int
 scan_identities(void)
 {
 	CFDictionaryRef query;
+	CFDataRef pkeyhash;
 	CFTypeRef result;
 	CFTypeID resid;
 	int ret;
@@ -1981,17 +1984,7 @@ scan_identities(void)
 		kCFBooleanTrue,			/* kSecReturnAttributes */
 	};
 
-	/*
-	 * Clear out all previous identity entries and object tree
-	 */
-
-	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
-	id_list_free();
-
-	if (lacontext != NULL)
-		lacontext_free(lacontext);
-
-	lacontext = lacontext_new();
+	os_log_debug(logsys, "Performing identity scan");
 
 	/*
 	 * Create the query dictionary for SecCopyItemMatching(); see above
@@ -2015,6 +2008,18 @@ scan_identities(void)
 
 	CFRelease(query);
 
+	/*
+	 * It turns out that to detect card insertions/removals, we need
+	 * to change things a bit (we used to scan for identities only once).
+	 * So here's what we do now; perform the following tests:
+	 *
+	 * Do we have the same number of identities?
+	 * Do we have the same public key hashes?
+	 *
+	 * If this is all the same, then we return.  Otherwise we perform
+	 * a full rescan.
+	 */
+
 	if (ret) {
 		/*
 		 * Handle the case where we just don't see any matching
@@ -2022,14 +2027,43 @@ scan_identities(void)
 		 */
 
 		if (ret == errSecItemNotFound) {
-			os_log_debug(logsys, "No identities returned");
-			id_list_init = true;
-			return 0;
-		}
+			os_log_debug(logsys, "No identities found");
+			/*
+			 * If this is the same as before?  If so, then
+			 * just return here
+			 */
 
-		LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
-		return -1;
-	}
+			if (id_list_count == 0)
+				return 0;
+		} else {
+			LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
+			return -1;
+		}
+	} else {
+		/*
+		 * Check to see if we have the same number of entries
+		 * and the same public key hashes.
+		 *
+		 * Because right now we compare each entry in order to
+		 * the corresponding entry in id_list, we will trigger a
+		 * rescan if the identity order varies; as far as I can
+		 * tell this doesn't happen, but we'll need to fix that
+		 * in the future if it does.
+		 */
+
+		
+
+	/*
+	 * Clear out all previous identity entries and object tree
+	 */
+
+	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
+	id_list_free();
+
+	if (lacontext != NULL)
+		lacontext_free(lacontext);
+
+	lacontext = lacontext_new();
 
 	/*
 	 * Check to see if we got an array (more than one identity) or
@@ -2443,6 +2477,25 @@ getaccesscontrol(CFDictionaryRef dict)
 }
 
 /*
+ * A "safe" version of CFArrayGetCount().
+ *
+ * SecItemCopyMatching can sometimes return a single entry or a CFArrayRef
+ * with multiple entries.  So to be as robust as possible, handle this case
+ * here.  If we have something OTHER than a CFArrayRef, then just return a
+ * count of "1".  Otherwise return the real array count.
+ */
+
+static unsigned int
+cflistcount(CFTypeRef ref)
+{
+	if (CFGetTypeID(ref) == CFArrayGetTypeID()) {
+		return CFArrayGetListCount((CFArrayRef) ref);
+	} else {
+		return 1;
+	}
+}
+
+/*
  * Make sure the our custom logging system is enabled
  */
 
@@ -2481,7 +2534,6 @@ id_list_free(void)
 
 	id_list = NULL;
 	id_list_count = id_list_size = 0;
-	id_list_init = false;
 }
 
 /*
