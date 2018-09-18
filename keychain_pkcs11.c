@@ -153,12 +153,19 @@ static void *lacontext = NULL;			/* LocalAuth context */
 
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
+static void scan_certificates(void);
+static void add_certificate(CFDictionaryRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static unsigned int cflistcount(CFTypeRef);	/* Count of list entries */
 static CFDictionaryRef cfgetindex(CFTypeRef, unsigned int);/* Entry in list */
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
+
+static const char *default_cert_search[] = {
+	"DoD Root CA",
+	NULL,
+};
 
 /*
  * Our object list and the functions to handle them
@@ -259,6 +266,7 @@ do { \
 	var = sess_list[session]; \
 	UNLOCK_MUTEX(sess_mutex); \
 } while (0)
+
 /*
  * Our attribute list used for searching
  */
@@ -266,6 +274,21 @@ do { \
 static bool search_object(struct obj_info *, CK_ATTRIBUTE_PTR, unsigned int);
 static CK_ATTRIBUTE_PTR find_attribute(struct obj_info *, CK_ATTRIBUTE_TYPE);
 static void dump_attribute(const char *, CK_ATTRIBUTE_PTR);
+
+/*
+ * Our certificate list.  We use this to store certificates we've imported
+ * from the system Keychains.
+ */
+
+struct certinfo {
+	SecCertificateRef	cert;
+	CFStringRef		commonname;
+	CFDataRef		pkeyhash;
+};
+
+static struct certinfo *cert_list = NULL;
+static unsigned int cert_list_size = 0;
+static unsigned int cert_list_count = 0;
 
 /*
  * Various other utility functions we need
@@ -445,6 +468,8 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 			     progname);
 		ask_pin = true;
 	}
+
+	scan_certificates();
 
 	initialized = 1;
 
@@ -2103,7 +2128,7 @@ rebuild:
 	for (i = 0; i < count; i++)  {
 		os_log_debug(logsys, "Copying identity %u", i + 1);
 
-		if (add_identity(CFArrayGetValueAtIndex(result, i))) {
+		if (add_identity(cfgetindex(result, i))) {
 			ret = -1;
 			goto out;
 		}
@@ -2196,6 +2221,15 @@ add_identity(CFDictionaryRef dict)
 		NULL,				/* UseAuthtenticationContext */
 		NULL,				/* PersistentReference */
 	};
+
+	/*
+	 * Just in case ...
+	 */
+
+	if (dict == NULL) {
+		os_log_debug(logsys, "Identity dictionary is NULL, returning!");
+		return -1;
+	}
 
 	/*
 	 * If we don't have enough id entries, allocate some more.
@@ -2375,6 +2409,326 @@ add_identity(CFDictionaryRef dict)
 		return -1;
 
 	return 0;
+}
+
+/*
+ * Scan the Keychain for certificates and add them to our object database
+ *
+ * This uses SecItemCopyMatching, but searches for certificates that
+ * have a subject name that matches one of our match strings.  Once we
+ * find that certificate then we chase down all certificates issued
+ * by that certificate; this means you should only need to list Root CAs
+ * in your match string list.
+ */
+
+static void
+scan_certificates(void)
+{
+	const char **certs = default_cert_search, **p;
+
+	/*
+	 * Short circuit the search if "none" is the first entry
+	 */
+
+	if (certs[0] && strcasecmp(certs[0], "none") == 0)
+		return;
+
+	for (p = certs; *p != NULL; p++) {
+		/*
+		 * Search for certificates that match this subject string
+		 * by calling SecItemCopyMatching().  The entries from
+		 * our query dictionary are:
+		 *
+		 * kSecClass = kSecClassCertificate
+		 *	This means we're searching for certificates only,
+		 *	and we don't need private key objects
+		 * kSecMatchLimit = kSecMatchLimitAll
+		 *	Return all matching certificates
+		 * kSecMatchSubjectContains
+		 *	Match only certificates which have subjects which
+		 *	contains the specified match string (either from
+		 *	our default string or a user-supplied match list)
+		 * kSecMatchTrustedOnly = kCFBooleanTrue
+		 *	Only match trusted certificates
+		 * kSecReturnRef = kCFBooleanTrue
+		 *	This means return a reference to the certificate
+		 *	object (a SecCertificateRef).  Because we also use
+		 *	kSecReturnAttributes that means the certificate
+		 *	reference ends up in the attribute dictionary.
+		 * kSecReturnAttributes = kCFBooleanTrue
+		 *	This means we return all of the attributes for each 
+		 *	certificate.
+		 */
+
+		const void *keys[] = { 
+			kSecClass,
+			kSecMatchLimit,
+#define MATCHSUB_INDEX 2
+			kSecMatchSubjectContains,
+			kSecMatchTrustedOnly,
+			kSecReturnRef,
+			kSecReturnAttributes,
+		};
+
+		const void *values[] = {
+			kSecClassCertificate,	/* kSecClass */
+			kSecMatchLimitAll,	/* kSecMatchLimit */
+			NULL,			/* kSecMatchSubjectContains */
+			kCFBooleanTrue,		/* kSecMatchTrustedOnly */
+			kCFBooleanTrue,		/* kSecReturnRef */
+			kCFBooleanTrue,		/* kSecReturnAttributes */
+		};
+
+		CFStringRef mstr;
+		CFDictionaryRef query;
+		CFTypeRef result = NULL;
+		OSStatus ret;
+		unsigned int count, i;
+
+		mstr = CFStringCreateWithCString(NULL, *p,
+						 kCFStringEncodingUTF8);
+
+		if (! mstr) {
+			os_log_debug(logsys, "Unable to create subject "
+				     "match string for string \"%s\"", *p);
+			return;
+		}
+
+		values[MATCHSUB_INDEX] = mstr;
+
+		query = CFDictionaryCreate(NULL, keys, values,
+					   sizeof(keys)/sizeof(keys[0]),
+					   &kCFTypeDictionaryKeyCallBacks,
+					   &kCFTypeDictionaryValueCallBacks);
+
+		CFRelease(mstr);
+
+		if (! query) {
+			os_log_debug(logsys, "Unable to create query "
+				     "dictionary for match string \"%s\"", *p);
+			return;
+		}
+
+		ret = SecItemCopyMatching(query, &result);
+
+		CFRelease(query);
+
+		/*
+		 * If we didn't find any matching certificates for this
+		 * string, just continue
+		 */
+
+		if (ret) {
+			if (ret == errSecItemNotFound) {
+				os_log_debug(logsys, "No certificates matched "
+					     "subject string \"%s\"", *p);
+				continue;
+			} else {
+				LOG_SEC_ERR("Certificate SecItemCopyMatching "
+					    "failed: %@", ret);
+				return;
+			}
+		}
+
+		count = cflistcount(result);
+
+		os_log_debug(logsys, "Subject matching string \"%s\": %u "
+			     "certificates", *p, count);
+
+		for (i = 0; i < count; i++)
+			add_certificate(cfgetindex(result, i));
+
+		CFRelease(result);
+	}
+}
+
+/*
+ * Add a certificate to our internal list that ends up on the list of
+ * trusted certificates we present from our certificate slot.
+ */
+
+void
+add_certificate(CFDictionaryRef dict)
+{
+	CFTypeRef val, result = NULL;
+	SecCertificateRef cert;
+	CFDataRef pkey;
+	CFArrayRef matarray = NULL;
+	CFStringRef cn;
+	CFDictionaryRef query;
+	OSStatus ret;
+	unsigned int i, c = cert_list_count, count;
+
+	/*
+	 * Our query dictionary we use to get certificates that have been
+	 * issued by this certificate.
+	 *
+	 * kSecClass = kSecClassCertificate
+	 *	Certificates only
+	 * kSecMatchLimit = kSecMatchLimitAll
+	 *	Return all matching certificates
+	 * kSecMatchTrustedOnly = kCFBooleanTrue
+	 *	Only match trusted certificates
+	 * kSecMatchIssuers
+	 *	Match only certificates which have been issued by this
+	 *	certificate or somewhere in the trust chain.  Must be
+	 *	an CFArray of CFDataRefs containing normalized issuer sequence.
+	 * kSecReturnRef = kCFBooleanTrue
+	 *	Make sure we return a SecCertificateRef
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 *	This means we return all of the attributes for each 
+	 *	certificate.
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+		kSecMatchLimit,
+		kSecMatchTrustedOnly,
+#define MATCHISSUER_INDEX 3
+		kSecMatchIssuers,
+		kSecReturnRef,
+		kSecReturnAttributes,
+	};
+
+	const void *values[] = {
+		kSecClassCertificate,	/* kSecClass */
+		kSecMatchLimitAll,	/* kSecMatchLimit */
+		kCFBooleanTrue,		/* kSecMatchTrustedOnly */
+		NULL,			/* kSecMatchIssuers */
+		kCFBooleanTrue,		/* kSecReturnRef */
+		kCFBooleanTrue,		/* kSecReturnAttributes */
+	};
+
+	/*
+	 * For reasons I do not understand, SecItemCopyMatching will always
+	 * return hardware token certificates even though the subject name
+	 * doesn't match our search string.  You can LITERALLY pass in "Fart"
+	 * for the subject match string and you'll still get hardware
+	 * token certificates back.  Sigh.  Because of that, reject
+	 * hardware tokens right off the bat.
+	 */
+
+	if (CFDictionaryGetValueIfPresent(dict, kSecAttrAccessGroup,
+					  (const void **) &val)) {
+		if (CFEqual(val, kSecAttrAccessGroupToken)) {
+			os_log_debug(logsys, "Certificate is on hardware "
+				     "token, skipping");
+			return;
+		}
+	}
+
+	/*
+	 * Extract our the certificate reference and public key hash; use
+	 * the public key hash to see if we have it already
+	 */
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecValueRef,
+					    (const void **) &cert)) {
+		os_log_debug(logsys, "No certificate reference found, "
+			     "skipping!");
+		return;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrPublicKeyHash,
+					   (const void **) &pkey)) {
+		os_log_debug(logsys, "No public key hash found, skipping!");
+		return;
+	}
+
+	ret = SecCertificateCopyCommonName(cert, &cn);
+
+	if (ret) {
+		LOG_SEC_ERR("Unable to retrieve certificate common "
+			    "name: %@", ret);
+		return;
+	}
+
+	os_log_debug(logsys, "Adding certificate %{public}@", cn);
+
+	/*
+	 * Search to see if we have this already.  I realize this will
+	 * start to perform poorly if we get a lot of certificates, but
+	 * we only do this once.
+	 */
+
+	for (i = 1; i < cert_list_count; i++) {
+		if (CFEqual(pkey, cert_list[i].pkeyhash)) {
+			os_log_debug(logsys, "Certificate is already in list, "
+				     "skipping");
+			CFRelease(cn);
+			return;
+		}
+	}
+
+	/*
+	 * Add this to our certificate list.
+	 */
+
+	if (++cert_list_count > cert_list_size) {
+		cert_list_size += 5;
+
+		cert_list = realloc(cert_list,
+				    sizeof(*cert_list) * cert_list_size);
+	}
+
+	cert_list[c].cert = cert;
+	CFRetain(cert_list[c].cert);
+	cert_list[c].commonname = cn;	/* We already own this */
+	cert_list[c].pkeyhash = pkey;
+	CFRetain(cert_list[c].pkeyhash);
+
+	/*
+	 * Generate a list of certificates ISSUED by this certificate,
+	 * and add them.
+	 */
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrIssuer,
+					    (const void **) &val)) {
+		os_log_debug(logsys, "Unable to retrieve issuer, returning");
+		return;
+	}
+
+	matarray = CFArrayCreate(NULL, &val, 1, &kCFTypeArrayCallBacks);
+
+	if (! matarray) {
+		os_log_debug(logsys, "Unable to create issuer array!");
+		return;
+	}
+
+	values[MATCHISSUER_INDEX] = matarray;
+
+	query = CFDictionaryCreate(NULL, keys, values,
+				   sizeof(keys)/sizeof(keys[0]),
+				   &kCFTypeDictionaryKeyCallBacks,
+				   &kCFTypeDictionaryValueCallBacks);
+
+	CFRelease(matarray);
+
+	if (! query) {
+		os_log_debug(logsys, "Unable to create issuer query "
+			     "dictionary, returning");
+		return;
+	}
+
+	ret = SecItemCopyMatching(query, &result);
+
+	if (ret) {
+		if (ret == errSecItemNotFound)
+			os_log_debug(logsys, "No issued certs found for "
+				     "%{public}@", cn);
+		else
+			LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
+		return;
+	}
+
+	count = cflistcount(result);
+
+	os_log_debug(logsys, "%{public}@: %u issued certs found", cn, count);
+
+	for (i = 0; i < count; i++)
+		add_certificate(cfgetindex(result, i));
+
+	return;
 }
 
 /*
