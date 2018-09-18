@@ -155,7 +155,7 @@ static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static unsigned int cflistcount(CFTypeRef);	/* Count of list entries */
-static CFDictionaryRef cfgetindex(CFTypeRef);	/* Entry in list */
+static CFDictionaryRef cfgetindex(CFTypeRef, unsigned int);/* Entry in list */
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
@@ -525,20 +525,17 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		     (int) *slot_num);
 
 	/*
-	 * We need to rescan our identity list if we haven't been initialized.
+	 * We will (re) check our identity list if slot_list is NULL.
 	 *
-	 * We used to do a rescan if slot_list was NULL, but it got to be
-	 * too hard to allow a rescan and keep references to identities
-	 * if we had open sessions.  So for now the only way to rescan the
-	 * slot list (and check for different identities) is to call
-	 * C_Initialize() again (which means calling C_Finalize()) which
-	 * will reset all of the identity information.  My reading of
-	 * PKCS#11 says that's ok.
+	 * We've gone back and forth on this; before we only did a rescan
+	 * if C_Finalize()/C_Initialize() was called, but that doesn't
+	 * seem quite right for some applications.  So right now we'll
+	 * check if things have changed if slot_list is NULL.
 	 */
 
 	LOCK_MUTEX(id_mutex);
 
-	if (! id_list_init) {
+	if (! slot_list) {
 		if (scan_identities()) {
 			rv = CKR_FUNCTION_FAILED;
 			goto out;
@@ -1918,10 +1915,9 @@ static int
 scan_identities(void)
 {
 	CFDictionaryRef query;
-	CFDataRef pkeyhash;
-	CFTypeRef result;
-	CFTypeID resid;
-	int ret;
+	CFTypeRef result = NULL;
+	unsigned int i, count;
+	int ret = 0;
 
 	/*
 	 * Our keys to create our query dictionary; note that the order
@@ -2033,29 +2029,66 @@ scan_identities(void)
 			 * just return here
 			 */
 
-			if (id_list_count == 0)
+			if (id_list_count == 0) {
 				return 0;
+			} else {
+				os_log_debug(logsys, "We now have no "
+					     "identities (previously had %u)",
+					     id_list_count);
+				count = 0;
+				goto rebuild;
+			}
 		} else {
 			LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
 			return -1;
 		}
-	} else {
-		/*
-		 * Check to see if we have the same number of entries
-		 * and the same public key hashes.
-		 *
-		 * Because right now we compare each entry in order to
-		 * the corresponding entry in id_list, we will trigger a
-		 * rescan if the identity order varies; as far as I can
-		 * tell this doesn't happen, but we'll need to fix that
-		 * in the future if it does.
-		 */
+	}
 
-		
+	/*
+	 * Check to see if we have the same number of entries
+	 * and the same public key hashes.
+	 *
+	 * Because right now we compare each entry in order to
+	 * the corresponding entry in id_list, we will trigger a
+	 * rescan if the identity order varies; as far as I can
+	 * tell this doesn't happen, but we'll need to fix that
+	 * in the future if it does.
+	 */
+
+	count = cflistcount(result);
+
+	if (count != id_list_count) {
+		os_log_debug(logsys, "We have %u identities, previously we "
+			     "had %u", count, id_list_count);
+		goto rebuild;
+	}
+
+	for (i = 0; i < count; i++) {
+		CFDictionaryRef dict;
+		CFDataRef data;
+
+		dict = cfgetindex(result, i);
+
+		if (CFDictionaryGetValueIfPresent(dict, kSecAttrPublicKeyHash,
+						  (const void **) &data)) {
+			if (!CFEqual(data, id_list[i].pkeyhash)) {
+				os_log_debug(logsys, "public key hash for "
+					     "identity %u differs", i + 1);
+				goto rebuild;
+			}
+		}
+	}
+
+	os_log_debug(logsys, "Identity inventory unchanged");
+
+	goto out;
 
 	/*
 	 * Clear out all previous identity entries and object tree
 	 */
+
+rebuild:
+	os_log_debug(logsys, "Rebuilding identity list and object tree");
 
 	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
 	id_list_free();
@@ -2065,40 +2098,16 @@ scan_identities(void)
 
 	lacontext = lacontext_new();
 
-	/*
-	 * Check to see if we got an array (more than one identity) or
-	 * a dictionary (a single item).
-	 */
+	os_log_debug(logsys, "%u identities found", count);
 
-	resid = CFGetTypeID(result);
+	for (i = 0; i < count; i++)  {
+		os_log_debug(logsys, "Copying identity %u", i + 1);
 
-	if (resid == CFArrayGetTypeID()) {
-		unsigned int i, count = CFArrayGetCount(result);
-
-		os_log_debug(logsys, "%u identities found", count);
-
-		for (i = 0; i < count; i++)  {
-			os_log_debug(logsys, "Copying identity %u", i + 1);
-
-			if (add_identity(CFArrayGetValueAtIndex(result, i))) {
-				ret = -1;
-				goto out;
-			}
-		}
-	} else if (resid == CFDictionaryGetTypeID()) {
-		os_log_debug(logsys, "1 identity found");
-		if (add_identity(result)) {
+		if (add_identity(CFArrayGetValueAtIndex(result, i))) {
 			ret = -1;
 			goto out;
 		}
-	} else {
-		logtype("Unexpected type from SecCopyItemMatching", result);
-		ret = -1;
-		goto out;
 	}
-
-	ret = 0;
-	id_list_init = true;
 
 	/*
 	 * Rebuild our object tree since we've finished the identity scan
@@ -2107,7 +2116,8 @@ scan_identities(void)
 	build_objects(0);
 
 out:
-	CFRelease(result);
+	if (result)
+		CFRelease(result);
 	return ret;
 }
 
@@ -2202,6 +2212,7 @@ add_identity(CFDictionaryRef dict)
 	id_list[i].pubkey = NULL;
 	id_list[i].label = NULL;
 	id_list[i].secaccess = NULL;
+	id_list[i].pkeyhash = NULL;
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
 					    (const void **)&p_ref)) {
@@ -2307,6 +2318,15 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	id_list[i].keytype = convert_keytype(keytype);
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrPublicKeyHash,
+					    (const void **)
+							&id_list[i].pkeyhash)) {
+		os_log_debug(logsys, "Public key hash not found");
+		return -1;
+	}
+
+	CFRetain(id_list[i].pkeyhash);
 
 	id_list[i].privcansign = boolfromdict("Can-Sign", dict,
 					      kSecAttrCanSign);
@@ -2489,9 +2509,29 @@ static unsigned int
 cflistcount(CFTypeRef ref)
 {
 	if (CFGetTypeID(ref) == CFArrayGetTypeID()) {
-		return CFArrayGetListCount((CFArrayRef) ref);
+		return CFArrayGetCount((CFArrayRef) ref);
 	} else {
 		return 1;
+	}
+}
+
+/*
+ * A "safe" version of CFArrayGetValueAtIndex
+ *
+ * If the passed-in type is a CFArray, then return the appropriate value
+ * at the passed-in index.  If it is a CFDictionaryRef, then just return
+ * passed-in value if the index is 0; anything else, return a NULL.
+ */
+
+static CFDictionaryRef
+cfgetindex(CFTypeRef ref, unsigned int index)
+{
+	if (CFGetTypeID(ref) == CFArrayGetTypeID()) {
+		return CFArrayGetValueAtIndex((CFArrayRef) ref, index);
+	} else if (CFGetTypeID(ref) == CFDictionaryGetTypeID() && index == 0) {
+		return ref;
+	} else {
+		return NULL;
 	}
 }
 
@@ -2527,6 +2567,8 @@ id_list_free(void)
 			CFRelease(id_list[i].cert);
 		if (id_list[i].secaccess)
 			CFRelease(id_list[i].secaccess);
+		if (id_list[i].pkeyhash)
+			CFRelease(id_list[i].pkeyhash);
 	}
 
 	if (id_list)
