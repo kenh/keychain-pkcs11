@@ -308,14 +308,16 @@ int main(int argc, char *argv[]) {
     struct op_list *dec_head = NULL, *dec_tail = NULL, *dec;
 
     bool sleepatexit = false;
-    bool tokenlogin = true;
+    bool tokenlogin;
+    bool forcelogin = false;
+    bool forcenologin = false;
     bool requiretoken = true;
 
     struct attr_list *attr_head = NULL, *attr_tail = NULL, *attr;
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:D:E:f:F:LN:n:o:S:s:Tv:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:Tv:V:w")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -393,8 +395,13 @@ int main(int argc, char *argv[]) {
 	    attr_filetemplate = optarg;
 	    attr_filename = NULL;
 	    break;
+	case 'l':
+	    forcelogin = true;
+	    forcenologin = false;
+	    break;
 	case 'L':
-	    tokenlogin = false;
+	    forcenologin = true;
+	    forcelogin = false;
 	    break;
 	case 'N':
 	    if (sObject == -1) {
@@ -598,6 +605,13 @@ int main(int argc, char *argv[]) {
     } else {
         fprintf(stderr, "Error getting token info (rv = %s)\n", getCKRName(rv));
     }
+
+    if (forcelogin)
+	tokenlogin = true;
+    else if (forcenologin)
+    	tokenlogin = false;
+    else
+    	tokenlogin = tInfo.flags & CKF_LOGIN_REQUIRED ? true : false;
 
     if (p11p->C_GetMechanismList)
 	rv = p11p->C_GetMechanismList(slot, NULL, &count);
