@@ -32,13 +32,17 @@
 #define CK_MINOR_VERSION 40
 
 /* Our slot numbers we use */
-#define KEYCHAIN_SLOT		1
+#define TOKEN_SLOT		1
 #define CERTIFICATE_SLOT	2
 
-/* Return CKR_SLOT_ID_INVALID if we are given anything except KEYCHAIN_SLOT */
+/*
+ * Return CKR_SLOT_ID_INVALID if we are given anything except TOKEN_SLOT
+ * or CERTIFICATE_SLOT
+ */
+
 #define CHECKSLOT(slot) \
 do { \
-	if (slot != KEYCHAIN_SLOT || !have_slot) { \
+	if (slot != TOKEN_SLOT && slot != CERTIFICATE_SLOT) { \
 		os_log_debug(logsys, "Slot %lu is invalid, returning " \
 			     "CKR_SLOT_ID_INVALID", slot); \
 		return CKR_SLOT_ID_INVALID; \
@@ -147,7 +151,6 @@ struct id_info {
 static struct id_info *id_list = NULL;
 static unsigned int id_list_count = 0;		/* Number of valid entries */
 static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
-static bool have_slot = false;			/* True if we have a slot */
 static bool ask_pin = false;			/* Should we ask for a PIN? */
 static bool logged_in = false;			/* Are we logged into card? */
 static void *lacontext = NULL;			/* LocalAuth context */
@@ -196,7 +199,7 @@ struct obj_info {
 	os_log_debug(logsys, "Object %lu (%s)", obj, \
 		     getCKOName(se->obj_list[obj].class));
 
-static void build_objects(int);
+static void build_id_objects(int);
 static void obj_free(struct obj_info **, unsigned int *, unsigned int *);
 
 static struct obj_info *id_obj_list = NULL;	/* Identity object list */
@@ -282,6 +285,7 @@ struct certinfo {
 static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
+static bool cert_list_initialized = false;
 
 /*
  * Various structures/functions we need for Keychain certificate import
@@ -291,6 +295,11 @@ static const char *default_cert_search[] = {
 	"DoD Root CA",
 	NULL,
 };
+
+/*
+ * Sigh, I realize I have a cert_list AND a certlist.  Not great naming
+ * on my part; I just don't want to change it now
+ */
 
 struct certlist {
 	CFDictionaryRef		certdict;
@@ -305,6 +314,7 @@ struct certcontext {
 
 static void scan_certificates(void);
 static void add_certificate(CFDictionaryRef, CFMutableSetRef);
+static void cert_list_free(void);
 static struct certlist *search_certs(CFMutableSetRef, CFArrayRef, CFDataRef);
 static void cn_match(const void *, void *);
 static void issuer_match(const void *, void *);
@@ -525,9 +535,10 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	DESTROY_MUTEX(id_mutex);
 	DESTROY_MUTEX(sess_mutex);
 
+	cert_list_free();
+
 	use_mutex = 0;
 	initialized = 0;
-	have_slot = false;
 
 	RET(C_Finalize, CKR_OK);
 }
@@ -602,20 +613,27 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 	if (!token_present || id_list_count > 0) {
 		if (slot_list) {
-			if (*slot_num == 0)
+			if (*slot_num < 2)
 				rv = CKR_BUFFER_TOO_SMALL;
-			else
-				slot_list[0] = KEYCHAIN_SLOT;/* Our only slot */
+			else {
+				slot_list[0] = TOKEN_SLOT;
+				slot_list[1] = CERTIFICATE_SLOT;
+			}
 		}
-		*slot_num = 1;
-		have_slot = true;
+		*slot_num = 2;
 	} else {
 		/*
 		 * If we're here, token_present is TRUE and we have no
-		 * identities, so return zero slots
+		 * identities, so only return the certificate slot
 		 */
-		*slot_num = 0;
-		have_slot = false;
+		if (slot_list) {
+			if (*slot_num < 1)
+				rv = CKR_BUFFER_TOO_SMALL;
+			else {
+				slot_list[0] = CERTIFICATE_SLOT;
+			}
+		}
+		*slot_num = 1;
 	}
 
 out:
@@ -647,20 +665,30 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	 * CKF_TOKEN_PRESENT flag if we have a token inserted or not.
 	 */
 
-	sprintfpad(slot_info->slotDescription,
-		  sizeof(slot_info->slotDescription), "%s",
-		  id_list_count > 0 ? id_list[0].label :
-		  	"Keychain PKCS#11 Bridge Library Virtual Slot");
 	sprintfpad(slot_info->manufacturerID,
 		   sizeof(slot_info->manufacturerID), "%s",
 		   "U.S. Naval Research Lab");
 
-	slot_info->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
+	switch (slot_id) {
+	case TOKEN_SLOT:
+		sprintfpad(slot_info->slotDescription,
+			   sizeof(slot_info->slotDescription), "%s",
+			   id_list_count > 0 ? id_list[0].label :
+				"Keychain PKCS#11 Bridge Library Virtual Slot");
+		slot_info->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
 
-	LOCK_MUTEX(id_mutex);
-	if (id_list_count > 0)
-		slot_info->flags |= CKF_TOKEN_PRESENT;
-	UNLOCK_MUTEX(id_mutex);
+		LOCK_MUTEX(id_mutex);
+		if (id_list_count > 0)
+			slot_info->flags |= CKF_TOKEN_PRESENT;
+		UNLOCK_MUTEX(id_mutex);
+		break;
+	case CERTIFICATE_SLOT:
+		sprintfpad(slot_info->slotDescription,
+			   sizeof(slot_info->slotDescription), "%s",
+			   "Keychain Certificates");
+		slot_info->flags = CKF_TOKEN_PRESENT;
+		break;
+	}
 
 	slot_info->hardwareVersion.major = 1;
 	slot_info->hardwareVersion.minor = 0;
@@ -687,16 +715,29 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	if (! token_info)
 		RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
 
+	if (slot_id == TOKEN_SLOT && id_list_count == 0)
+		RET(C_GetTokenInfo, CKR_TOKEN_NOT_PRESENT);
+
 	/*
-	 * Since this is used as label in a number of places to display
-	 * to the user, make it something useful.  Pick the first certificate
-	 * we found (if available) and return the subject summary as
-	 * the token label.
+	 * We can't do any administrative operations, really, from the
+	 * Security framework, so basically make it so the token is
+	 * read/only.
 	 */
+	token_info->flags = CKF_WRITE_PROTECTED |
+			    CKF_USER_PIN_INITIALIZED |
+			    CKF_TOKEN_INITIALIZED;
 
-	LOCK_MUTEX(id_mutex);
+	switch (slot_id) {
+	case TOKEN_SLOT:
+		/*
+		 * Since this is used as label in a number of places to display
+		 * to the user, make it something useful.  Pick the first
+		 * certificate found (if available) and return the subject
+		 * summary as the token label.
+		 */
 
-	if (id_list_count > 0) {
+		LOCK_MUTEX(id_mutex);
+
 		CFStringRef summary;
 		char *label;
 
@@ -714,12 +755,33 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 		free(label);
 		if (summary)
 			CFRelease(summary);
-	} else {
-		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
-			   "Keychain PKCS#11 Virtual Token");
-	}
 
-	UNLOCK_MUTEX(id_mutex);
+		UNLOCK_MUTEX(id_mutex);
+
+		token_info->flags |= CKF_LOGIN_REQUIRED;
+
+		/* 
+		 * If we were set to to NOT ask for a PIN in C_Login (see
+		 * the function C_Initialize for more info) then set the flag
+		 * CKF_PROTECTED_AUTHENTICATION_PATH.
+		 */
+
+		if (ask_pin) {
+			os_log_debug(logsys, "We are NOT setting the flag "
+				     "CKF_PROTECTED_AUTHENTICATION_PATH");
+		} else {
+			os_log_debug(logsys, "We ARE setting the flag "
+				     "CKF_PROTECTED_AUTHENTICATION_PATH");
+			token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
+		}
+
+		break;
+
+	case CERTIFICATE_SLOT:
+		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
+			   "Keychain Certificate Virtual Token");
+		break;
+	}
 
 	sprintfpad(token_info->manufacturerID,
 		   sizeof(token_info->manufacturerID), "%s",
@@ -728,29 +790,6 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 		   "Unknown Model");
 	sprintfpad(token_info->serialNumber, sizeof(token_info->serialNumber),
 		   "%s", "000001");
-	/*
-	 * We can't do any administrative operations, really, from the
-	 * Security framework, so basically make it so the token is
-	 * read/only.
-	 */
-	token_info->flags = CKF_WRITE_PROTECTED | CKF_LOGIN_REQUIRED |
-			    CKF_USER_PIN_INITIALIZED |
-			    CKF_TOKEN_INITIALIZED;
-
-	/* 
-	 * If we were set to to NOT ask for a PIN in C_Login (see
-	 * the function C_Initialize for more info) then set the flag
-	 * CKF_PROTECTED_AUTHENTICATION_PATH.
-	 */
-
-	if (ask_pin) {
-		os_log_debug(logsys, "We are NOT setting the flag "
-			     "CKF_PROTECTED_AUTHENTICATION_PATH");
-	} else {
-		os_log_debug(logsys, "We ARE setting the flag "
-			     "CKF_PROTECTED_AUTHENTICATION_PATH");
-		token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
-	}
 
 	token_info->ulMaxSessionCount = CK_EFFECTIVELY_INFINITE;
 	token_info->ulSessionCount = CK_UNAVAILABLE_INFORMATION;
@@ -986,7 +1025,7 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 	if (!session_info)
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
-	session_info->slotID = KEYCHAIN_SLOT;
+	session_info->slotID = TOKEN_SLOT;
 	session_info->state = logged_in ? CKS_RO_USER_FUNCTIONS :
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
@@ -2159,7 +2198,7 @@ rebuild:
 	 * Rebuild our object tree since we've finished the identity scan
 	 */
 
-	build_objects(0);
+	build_id_objects(0);
 
 out:
 	if (result)
@@ -2639,6 +2678,31 @@ out:
 		CFRelease(query);
 	if (result)
 		CFRelease(result);
+
+	cert_list_initialized = true;
+}
+
+/*
+ * Free our cert_list
+ */
+
+static void
+cert_list_free(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < cert_list_count; i++) {
+		if (cert_list[i].cert)
+			CFRelease(cert_list[i].cert);
+		if (cert_list[i].pkeyhash)
+			CFRelease(cert_list[i].pkeyhash);
+	}
+
+	free(cert_list);
+
+	cert_list = NULL;
+
+	cert_list_initialized = false;
 }
 
 /*
@@ -3328,7 +3392,7 @@ do { \
  */
 
 static void
-build_objects(int lock)
+build_id_objects(int lock)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
