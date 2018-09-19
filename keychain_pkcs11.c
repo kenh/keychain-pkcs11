@@ -154,7 +154,7 @@ static void *lacontext = NULL;			/* LocalAuth context */
 static int scan_identities(void);
 static int add_identity(CFDictionaryRef);
 static void scan_certificates(void);
-static void add_certificate(CFDictionaryRef);
+static void add_certificate(CFDictionaryRef, CFMutableArrayRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static unsigned int cflistcount(CFTypeRef);	/* Count of list entries */
 static CFDictionaryRef cfgetindex(CFTypeRef, unsigned int);/* Entry in list */
@@ -2425,59 +2425,109 @@ static void
 scan_certificates(void)
 {
 	const char **certs = default_cert_search, **p;
+	CFStringRef *cmatchstrs, *cm;
+	unsigned int certmatchcount = 0;
+
+	/*
+	 * I tried, at first, to use the built-in searching features
+	 * available in SecItemCopyMatching(), but that turned out to be
+	 * a failure for two reasons:
+	 *
+	 * Matching on the subject name (using kSecMatchSubjectContains)
+	 * SORT-of worked, except if you have a hardware token you will
+	 * get certificates on the hardware token included in the list
+	 * EVEN THOUGH the subject names don't match.
+	 *
+	 * Matching based on issuer (using kSecMatchIssuers) only works
+	 * for IDENTITIES, for some strange reason (really, there is no
+	 * good reason for this that I can tell).
+	 *
+	 * Because SecItemCopyMatching is kind of expensive, what I finally
+	 * decided on was this:
+	 *
+	 * Get a list of ALL certificates.
+	 *
+	 * Generate a CFMutableArray from the original certificate array.
+	 *
+	 * As we add each certificate, remove it from the CFMutableArray
+	 * (to improve on later searching).
+	 *
+	 * Some contortions are required to make this work right, since we
+	 * are deleting array entries as we go.  What I finally decided on
+	 * was to remove each matching certificate from the array as we
+	 * encountered it and store them in a linked list, and then traverse
+	 * the linked list to add them.
+	 *
+	 * Sigh.  Apple, why did you have to make this so hard?
+	 */
+
+	/*
+	 * Our query dictionary:
+	 *
+	 * kSecClass = kSecClassCertificate
+	 *	This means we're searching for certificates only,
+	 *	and we don't need private key objects
+	 * kSecMatchLimit = kSecMatchLimitAll
+	 *	Return all matching certificates
+	 * kSecMatchTrustedOnly = kCFBooleanTrue
+	 *	Only match trusted certificates
+	 * kSecReturnRef = kCFBooleanTrue
+	 *	This means return a reference to the certificate
+	 *	object (a SecCertificateRef).  Because we also use
+	 *	kSecReturnAttributes that means the certificate
+	 *	reference ends up in the attribute dictionary.
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 *	This means we return all of the attributes for each 
+	 *	certificate.
+	 */
+
+	const void *keys[] = { 
+		kSecClass,
+		kSecMatchLimit,
+		kSecMatchTrustedOnly,
+		kSecReturnRef,
+		kSecReturnAttributes,
+	};
+
+	const void *values[] = {
+		kSecClassCertificate,	/* kSecClass */
+		kSecMatchLimitAll,	/* kSecMatchLimit */
+		kCFBooleanTrue,		/* kSecMatchTrustedOnly */
+		kCFBooleanTrue,		/* kSecReturnRef */
+		kCFBooleanTrue,		/* kSecReturnAttributes */
+	};
 
 	/*
 	 * Short circuit the search if "none" is the first entry
 	 */
 
-	if (certs[0] && strcasecmp(certs[0], "none") == 0)
+	if (certs[0] && strcasecmp(certs[0], "none") == 0) {
+		os_log_debug(logsys, "Special entry \"none\" found, not "
+			     importing Keychain certificates");
 		return;
+	}
 
-	for (p = certs; *p != NULL; p++) {
+	for (p = certs; *p != NULL; p++)
+		certmatchcount++;
+
+	/*
+	 * This shouldn't be 0, but JUST in case ...
+	 */
+
+	if (certmatchcount == 0) {
+		os_log_debug(logsys, "No certificate match strings found, "
+			     "not importing certificates");
+		return;
+	}
+
+	cmatchstrs = 
+		
 		/*
 		 * Search for certificates that match this subject string
 		 * by calling SecItemCopyMatching().  The entries from
 		 * our query dictionary are:
 		 *
-		 * kSecClass = kSecClassCertificate
-		 *	This means we're searching for certificates only,
-		 *	and we don't need private key objects
-		 * kSecMatchLimit = kSecMatchLimitAll
-		 *	Return all matching certificates
-		 * kSecMatchSubjectContains
-		 *	Match only certificates which have subjects which
-		 *	contains the specified match string (either from
-		 *	our default string or a user-supplied match list)
-		 * kSecMatchTrustedOnly = kCFBooleanTrue
-		 *	Only match trusted certificates
-		 * kSecReturnRef = kCFBooleanTrue
-		 *	This means return a reference to the certificate
-		 *	object (a SecCertificateRef).  Because we also use
-		 *	kSecReturnAttributes that means the certificate
-		 *	reference ends up in the attribute dictionary.
-		 * kSecReturnAttributes = kCFBooleanTrue
-		 *	This means we return all of the attributes for each 
-		 *	certificate.
 		 */
-
-		const void *keys[] = { 
-			kSecClass,
-			kSecMatchLimit,
-#define MATCHSUB_INDEX 2
-			kSecMatchSubjectContains,
-			kSecMatchTrustedOnly,
-			kSecReturnRef,
-			kSecReturnAttributes,
-		};
-
-		const void *values[] = {
-			kSecClassCertificate,	/* kSecClass */
-			kSecMatchLimitAll,	/* kSecMatchLimit */
-			NULL,			/* kSecMatchSubjectContains */
-			kCFBooleanTrue,		/* kSecMatchTrustedOnly */
-			kCFBooleanTrue,		/* kSecReturnRef */
-			kCFBooleanTrue,		/* kSecReturnAttributes */
-		};
 
 		CFStringRef mstr;
 		CFDictionaryRef query;
