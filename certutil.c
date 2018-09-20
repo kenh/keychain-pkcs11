@@ -67,6 +67,7 @@
  */
 
 struct certinfo {
+	SecAsn1Item	serialnumber;	/* Certificate serial number */
 	SecAsn1Item	issuer;		/* Certificate issuer */
 	SecAsn1Item	subject;	/* Certificate subject */
 };
@@ -82,6 +83,7 @@ static const SecAsn1Template cert_template[] = {
 	{ SEC_ASN1_EXPLICIT | SEC_ASN1_OPTIONAL | SEC_ASN1_CONSTRUCTED |
 		SEC_ASN1_CONTEXT_SPECIFIC | 0, 0, kSecAsn1SkipTemplate, 0 },
 					/* Version (explicit tag 0) */
+	{ SEC_ASN1_SAVE, offsetof(struct certinfo, serialnumber), NULL, 0 },
 	{ SEC_ASN1_SKIP, 0, NULL, 0 },		/* CertificateSerialNumber */
 	{ SEC_ASN1_SKIP, 0, NULL, 0 },		/* AlgorithmIdentifier */
 	{ SEC_ASN1_SAVE, offsetof(struct certinfo, issuer), NULL, 0 },
@@ -98,7 +100,8 @@ static const SecAsn1Template cert_template[] = {
  */
 
 bool
-get_certificate_info(CFDataRef certdata, CFDataRef *issuer, CFDataRef *subject)
+get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
+		     CFDataRef *issuer, CFDataRef *subject)
 {
 	SecAsn1CoderRef coder;
 	struct certinfo cinfo;
@@ -134,6 +137,9 @@ get_certificate_info(CFDataRef certdata, CFDataRef *issuer, CFDataRef *subject)
 	 * Looks like it all worked!  Return those in CFData structures
 	 */
 
+	*serialnumber = CFDataCreate(kCFAllocatorDefault,
+				     cinfo.serialnumber.Data,
+				     cinfo.serialnumber.Length);
 	*issuer = CFDataCreate(kCFAllocatorDefault, cinfo.issuer.Data,
 			       cinfo.issuer.Length);
 	*subject = CFDataCreate(kCFAllocatorDefault, cinfo.subject.Data,

@@ -1193,23 +1193,23 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 					     attr->ulValueLen);
 			} else {
 				if (template[i].ulValueLen < attr->ulValueLen) {
-					template[i].ulValueLen =
-							attr->ulValueLen;
 					os_log_debug(logsys, "Attribute: "
 						     "buffer too small "
 						     "(%lu, %lu)",
 						     template[i].ulValueLen,
 						     attr->ulValueLen);
+					template[i].ulValueLen =
+							attr->ulValueLen;
 					rv = CKR_BUFFER_TOO_SMALL;
 				} else {
 					memcpy(template[i].pValue, attr->pValue,
 					       attr->ulValueLen);
-					template[i].ulValueLen =
-							attr->ulValueLen;
 					os_log_debug(logsys, "Copied over "
 						     "attribute (%lu, %lu)",
 						     template[i].ulValueLen,
 						     attr->ulValueLen);
+					template[i].ulValueLen =
+							attr->ulValueLen;
 				}
 			}
 		} else {
@@ -3445,7 +3445,7 @@ build_id_objects(int lock)
 
 	for (i = 0; i < id_list_count; i++) {
 		SecCertificateRef cert = id_list[i].cert;
-		CFDataRef subject = NULL, issuer = NULL;
+		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
 
 		OBJINIT(id);
 
@@ -3464,14 +3464,10 @@ build_id_objects(int lock)
 		ADD_ATTR(id, CKA_TOKEN, b);
 		ADD_ATTR_SIZE(id, CKA_LABEL, id_list[i].label,
 			      strlen(id_list[i].label));
-		d = SecCertificateCopySerialNumberData(cert, NULL);
-		ADD_ATTR_SIZE(id, CKA_SERIAL_NUMBER, CFDataGetBytePtr(d),
-			      CFDataGetLength(d));
-		CFRelease(d);
 		d = SecCertificateCopyData(cert);
 		ADD_ATTR_SIZE(id, CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
-		get_certificate_info(d, &issuer, &subject);
+		get_certificate_info(d, &serial, &issuer, &subject);
 		CFRelease(d);
 
 		if (subject)
@@ -3481,6 +3477,10 @@ build_id_objects(int lock)
 		if (issuer)
 			ADD_ATTR_SIZE(id, CKA_ISSUER, CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
+		if (serial)
+			ADD_ATTR_SIZE(id, CKA_SERIAL_NUMBER,
+				      CFDataGetBytePtr(serial),
+				      CFDataGetLength(serial));
 
 		NEW_OBJECT(id);
 		OBJINIT(id);
@@ -3527,6 +3527,8 @@ build_id_objects(int lock)
 			CFRelease(subject);
 		if (issuer)
 			CFRelease(issuer);
+		if (serial)
+			CFRelease(serial);
 	}
 
 	if (lock)
@@ -3543,6 +3545,7 @@ build_cert_objects(void)
 	int i;
 	CK_OBJECT_CLASS cl;
 	CK_CERTIFICATE_TYPE ct = CKC_X_509;	/* Only this for now */
+	CK_TRUST trust = CKT_NSS_TRUSTED_DELEGATOR;
 	CK_ULONG t;
 	CK_BBOOL b;
 	CFDataRef d;
@@ -3582,13 +3585,10 @@ build_cert_objects(void)
 		free(subjc);
 		CFRelease(subjstr);
 
-		serial = SecCertificateCopySerialNumberData(cert, NULL);
-		ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER, CFDataGetBytePtr(serial),
-			      CFDataGetLength(serial));
 		d = SecCertificateCopyData(cert);
 		ADD_ATTR_SIZE(cert, CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
-		get_certificate_info(d, &issuer, &subject);
+		get_certificate_info(d, &serial, &issuer, &subject);
 		CFRelease(d);
 
 		if (subject)
@@ -3599,6 +3599,10 @@ build_cert_objects(void)
 			ADD_ATTR_SIZE(cert, CKA_ISSUER,
 				      CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
+		if (serial)
+			ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER,
+				      CFDataGetBytePtr(serial),
+				      CFDataGetLength(serial));
 
 		NEW_OBJECT(cert);
 		OBJINIT(cert);
@@ -3609,12 +3613,20 @@ build_cert_objects(void)
 		b = CK_TRUE;
 		ADD_ATTR(cert, CKA_TOKEN, b);
 
-		if (subject)
+		if (issuer)
 			ADD_ATTR_SIZE(cert, CKA_ISSUER,
 				      CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
-		ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER, CFDataGetBytePtr(serial),
-			      CFDataGetLength(serial));
+		if (serial)
+			ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER,
+				      CFDataGetBytePtr(serial),
+				      CFDataGetLength(serial));
+
+		ADD_ATTR(cert, CKA_TRUST_SERVER_AUTH, trust);
+		ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, trust);
+		ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, trust);
+		ADD_ATTR(cert, CKA_TRUST_CODE_SIGNING, trust);
+		ADD_ATTR(cert, CKA_TRUST_STEP_UP_APPROVED, trust);
 
 		NEW_OBJECT(cert);
 
