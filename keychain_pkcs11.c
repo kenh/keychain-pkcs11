@@ -221,6 +221,7 @@ static unsigned int id_obj_size = 0;		/* Size of identity obj_list */
 
 struct session {
 	kc_mutex 	mutex;			/* Session mutex */
+	CK_SLOT_ID	slot_id;		/* Slot identifier */
 	struct obj_info *obj_list;		/* Pointer to object list */
 	unsigned int	obj_list_count;		/* Copy of object count */
 	unsigned int	obj_search_index;	/* Current search index */
@@ -287,6 +288,10 @@ static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
 static bool cert_list_initialized = false;
 
+static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
+static unsigned int cert_obj_count = 0;		/* Cert object list count */
+static unsigned int cert_obj_size = 0;		/* Size of identity obj_list */
+
 /*
  * Various structures/functions we need for Keychain certificate import
  */
@@ -320,6 +325,7 @@ static void cn_match(const void *, void *);
 static void issuer_match(const void *, void *);
 static void add_cert_to_list(CFDictionaryRef, struct certcontext *);
 static void free_certlist(struct certlist *);
+static void build_cert_objects(void);
 
 /*
  * Various other utility functions we need
@@ -500,8 +506,6 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		ask_pin = true;
 	}
 
-	scan_certificates();
-
 	initialized = 1;
 
 	RET(C_Initalize, CKR_OK);
@@ -535,6 +539,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	DESTROY_MUTEX(id_mutex);
 	DESTROY_MUTEX(sess_mutex);
 
+	obj_free(&cert_obj_list, &cert_obj_count, &cert_obj_size);
 	cert_list_free();
 
 	use_mutex = 0;
@@ -919,8 +924,28 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 
 	sess = malloc(sizeof(*sess));
 	CREATE_MUTEX(sess->mutex);
-	sess->obj_list = id_obj_list;
-	sess->obj_list_count = id_obj_count;
+
+	/*
+	 * Pick the right object list depending if we are using the
+	 * true hardware slot or the certificate hardware slot.
+	 */
+
+	switch (slot_id) {
+	case TOKEN_SLOT:
+		sess->obj_list = id_obj_list;
+		sess->obj_list_count = id_obj_count;
+		break;
+	case CERTIFICATE_SLOT:
+		if (!cert_list_initialized) {
+			scan_certificates();
+			build_cert_objects();
+		}
+		sess->obj_list = cert_obj_list;
+		sess->obj_list_count = cert_obj_count;
+		break;
+	}
+
+	sess->slot_id = slot_id;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
 	sess->sig_key = NULL;
@@ -1025,7 +1050,7 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 	if (!session_info)
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
-	session_info->slotID = TOKEN_SLOT;
+	session_info->slotID = se->slot_id;
 	session_info->state = logged_in ? CKS_RO_USER_FUNCTIONS :
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
@@ -3361,30 +3386,38 @@ convert_keytype(CFNumberRef type)
  * Build our list of objects based on our identities
  */
 
-#define ADD_ATTR_SIZE(attribute, var, size) \
+#define ADD_ATTR_SIZE(name, attribute, var, size) \
 do { \
 	void *p = malloc(size); \
 	memcpy(p, var, size); \
-	if (id_obj_list[id_obj_count].attr_count >= \
-	    id_obj_list[id_obj_count].attr_size) { \
-		id_obj_list[id_obj_count].attr_size += 5; \
-		id_obj_list[id_obj_count].attrs = realloc(id_obj_list[id_obj_count].attrs, \
-			id_obj_list[id_obj_count].attr_size * sizeof(CK_ATTRIBUTE)); \
+	if ( name ## _obj_list[ name ## _obj_count ].attr_count >= \
+	    name ## _obj_list[ name ## _obj_count ].attr_size) { \
+		name ## _obj_list[ name ## _obj_count ].attr_size += 5; \
+		name ## _obj_list[ name ## _obj_count ].attrs = realloc( name ## _obj_list[ name ## _obj_count ].attrs, \
+			name ## _obj_list[ name ## _obj_count ].attr_size * sizeof(CK_ATTRIBUTE)); \
 	} \
-	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].type = attribute; \
-	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].pValue = p; \
-	id_obj_list[id_obj_count].attrs[id_obj_list[id_obj_count].attr_count].ulValueLen = size; \
-	id_obj_list[id_obj_count].attr_count++; \
+	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count].attr_count].type = attribute; \
+	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count].attr_count].pValue = p; \
+	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count ].attr_count].ulValueLen = size; \
+	name ## _obj_list[ name ## _obj_count ].attr_count++; \
 } while (0)
 
-#define ADD_ATTR(attr, var) ADD_ATTR_SIZE(attr, &var, sizeof(var))
+#define ADD_ATTR(name, attr, var) ADD_ATTR_SIZE(name, attr, &var, sizeof(var))
 
-#define NEW_OBJECT() \
+#define NEW_OBJECT(name) \
 do { \
-	if (++id_obj_count >= id_obj_size) { \
-		id_obj_size += 5; \
-		id_obj_list = realloc(id_obj_list, id_obj_size * sizeof(*id_obj_list)); \
+	if (++ name ## _obj_count >= name ## _obj_size) { \
+		name ## _obj_size += 5; \
+		name ## _obj_list = realloc( name ## _obj_list, name ## _obj_size * sizeof(* name ## _obj_list )); \
 	} \
+} while (0)
+
+#define OBJINIT(name) \
+do { \
+	name ## _obj_list[ name ## _obj_count ].id_index = i; \
+	name ## _obj_list[ name ## _obj_count ].attrs = NULL; \
+	name ## _obj_list[ name ## _obj_count ].attr_count = 0; \
+	name ## _obj_list[ name ## _obj_count ].attr_size = 0; \
 } while (0)
 
 /*
@@ -3406,7 +3439,7 @@ build_id_objects(int lock)
 
 	if (id_list_count > 0) {
 		/* Prime the pump */
-		NEW_OBJECT();
+		NEW_OBJECT(id);
 		id_obj_count--;
 	}
 
@@ -3414,15 +3447,7 @@ build_id_objects(int lock)
 		SecCertificateRef cert = id_list[i].cert;
 		CFDataRef subject = NULL, issuer = NULL;
 
-#define OBJINIT() \
-do { \
-	id_obj_list[id_obj_count].id_index = i; \
-	id_obj_list[id_obj_count].attrs = NULL; \
-	id_obj_list[id_obj_count].attr_count = 0; \
-	id_obj_list[id_obj_count].attr_size = 0; \
-} while (0)
-
-		OBJINIT();
+		OBJINIT(id);
 
 		/*
 		 * Add in the object for each identity; cert, public key,
@@ -3432,68 +3457,71 @@ do { \
 		t = i;
 		cl = CKO_CERTIFICATE;
 		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(CKA_CLASS, cl);
-		ADD_ATTR(CKA_ID, t);
-		ADD_ATTR(CKA_CERTIFICATE_TYPE, ct);
+		ADD_ATTR(id, CKA_CLASS, cl);
+		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR(id, CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
-		ADD_ATTR(CKA_TOKEN, b);
-		ADD_ATTR_SIZE(CKA_LABEL, id_list[i].label,
+		ADD_ATTR(id, CKA_TOKEN, b);
+		ADD_ATTR_SIZE(id, CKA_LABEL, id_list[i].label,
 			      strlen(id_list[i].label));
 		d = SecCertificateCopySerialNumberData(cert, NULL);
-		ADD_ATTR_SIZE(CKA_SERIAL_NUMBER, CFDataGetBytePtr(d),
+		ADD_ATTR_SIZE(id, CKA_SERIAL_NUMBER, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
 		CFRelease(d);
 		d = SecCertificateCopyData(cert);
-		ADD_ATTR_SIZE(CKA_VALUE, CFDataGetBytePtr(d),
+		ADD_ATTR_SIZE(id, CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
 		get_certificate_info(d, &issuer, &subject);
 		CFRelease(d);
 
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(id, CKA_SUBJECT,
+				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 		if (issuer)
-			ADD_ATTR_SIZE(CKA_ISSUER, CFDataGetBytePtr(issuer),
+			ADD_ATTR_SIZE(id, CKA_ISSUER, CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
 
-		NEW_OBJECT();
-		OBJINIT();
+		NEW_OBJECT(id);
+		OBJINIT(id);
 
 		cl = CKO_PUBLIC_KEY;
 		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(CKA_CLASS, cl);
-		ADD_ATTR(CKA_ID, t);
-		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
+		ADD_ATTR(id, CKA_CLASS, cl);
+		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
-		ADD_ATTR(CKA_TOKEN, b);
+		ADD_ATTR(id, CKA_TOKEN, b);
 		b = id_list[i].pubcanencrypt;
-		ADD_ATTR(CKA_ENCRYPT, b);
+		ADD_ATTR(id, CKA_ENCRYPT, b);
 		b = id_list[i].pubcanverify;
-		ADD_ATTR(CKA_VERIFY, b);
+		ADD_ATTR(id, CKA_VERIFY, b);
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(id, CKA_SUBJECT,
+				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
-		NEW_OBJECT();
-		OBJINIT();
+		NEW_OBJECT(id);
+		OBJINIT(id);
 
 		cl = CKO_PRIVATE_KEY;
 		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(CKA_CLASS, cl);
-		ADD_ATTR(CKA_ID, t);
-		ADD_ATTR(CKA_KEY_TYPE, id_list[i].keytype);
+		ADD_ATTR(id, CKA_CLASS, cl);
+		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
-		ADD_ATTR(CKA_TOKEN, b);
-		ADD_ATTR(CKA_PRIVATE, b);
+		ADD_ATTR(id, CKA_TOKEN, b);
+		ADD_ATTR(id, CKA_PRIVATE, b);
 		b = id_list[i].privcandecrypt;
-		ADD_ATTR(CKA_DECRYPT, b);
+		ADD_ATTR(id, CKA_DECRYPT, b);
 		b = id_list[i].privcansign;
-		ADD_ATTR(CKA_SIGN, b);
+		ADD_ATTR(id, CKA_SIGN, b);
 		if (subject)
-			ADD_ATTR_SIZE(CKA_SUBJECT, CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(id, CKA_SUBJECT,
+				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
-		NEW_OBJECT();
+		NEW_OBJECT(id);
 
 		if (subject)
 			CFRelease(subject);
@@ -3503,6 +3531,100 @@ do { \
 
 	if (lock)
 		UNLOCK_MUTEX(id_mutex);
+}
+
+/*
+ * Build up a list of certificate objects
+ */
+
+static void
+build_cert_objects(void)
+{
+	int i;
+	CK_OBJECT_CLASS cl;
+	CK_CERTIFICATE_TYPE ct = CKC_X_509;	/* Only this for now */
+	CK_ULONG t;
+	CK_BBOOL b;
+	CFDataRef d;
+
+	if (cert_list_count > 0) {
+		/* Prime the pump */
+		NEW_OBJECT(cert);
+		cert_obj_count--;
+	}
+
+	for (i = 0; i < cert_list_count; i++) {
+		SecCertificateRef cert = cert_list[i].cert;
+		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
+		CFStringRef subjstr;
+		char *subjc;
+
+		OBJINIT(cert);
+
+		/*
+		 * Add in an object for each certificate.
+		 */
+
+		t = i + 0xff00;		/* offset so no collision */
+		cl = CKO_CERTIFICATE;
+		cert_obj_list[cert_obj_count].class = cl;
+		ADD_ATTR(cert, CKA_CLASS, cl);
+		ADD_ATTR(cert, CKA_ID, t);
+		ADD_ATTR(cert, CKA_CERTIFICATE_TYPE, ct);
+		b = CK_TRUE;
+		ADD_ATTR(cert, CKA_TOKEN, b);
+
+		subjstr = SecCertificateCopySubjectSummary(cert_list[i].cert);
+		subjc = getstrcopy(subjstr);
+
+		ADD_ATTR_SIZE(cert, CKA_LABEL, subjc, strlen(subjc));
+
+		free(subjc);
+		CFRelease(subjstr);
+
+		serial = SecCertificateCopySerialNumberData(cert, NULL);
+		ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER, CFDataGetBytePtr(serial),
+			      CFDataGetLength(serial));
+		d = SecCertificateCopyData(cert);
+		ADD_ATTR_SIZE(cert, CKA_VALUE, CFDataGetBytePtr(d),
+			      CFDataGetLength(d));
+		get_certificate_info(d, &issuer, &subject);
+		CFRelease(d);
+
+		if (subject)
+			ADD_ATTR_SIZE(cert, CKA_SUBJECT,
+				      CFDataGetBytePtr(subject),
+				      CFDataGetLength(subject));
+		if (issuer)
+			ADD_ATTR_SIZE(cert, CKA_ISSUER,
+				      CFDataGetBytePtr(issuer),
+				      CFDataGetLength(issuer));
+
+		NEW_OBJECT(cert);
+		OBJINIT(cert);
+
+		cl = CKO_NSS_TRUST;
+		cert_obj_list[cert_obj_count].class = cl;
+		ADD_ATTR(cert, CKA_CLASS, cl);
+		b = CK_TRUE;
+		ADD_ATTR(cert, CKA_TOKEN, b);
+
+		if (subject)
+			ADD_ATTR_SIZE(cert, CKA_ISSUER,
+				      CFDataGetBytePtr(issuer),
+				      CFDataGetLength(issuer));
+		ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER, CFDataGetBytePtr(serial),
+			      CFDataGetLength(serial));
+
+		NEW_OBJECT(cert);
+
+		if (subject)
+			CFRelease(subject);
+		if (issuer)
+			CFRelease(issuer);
+		if (serial)
+			CFRelease(serial);
+	}
 }
 
 /*
