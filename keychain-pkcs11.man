@@ -5,11 +5,55 @@
 .Nm keychain-pkcs11.dylib
 .Nd PKCS#11 bridge library
 .Sh DESCRIPTION
-The keychain-pkcs11.dylib library is used to provide a PKCS#11 API
+The
+.Nm
+library is used to provide a PKCS#11 API
 for the SmartCard services provided by the Security Framework.  This
 provides a way for programs that can use the PKCS#11 API to access
 smartcards using the native support on OS X (High Sierra and newer).
+.Sh OVERVIEW
+By default
+.Nm
+will provide two virtual PKCS#11 slots.  The first slot will provide all
+identities that are available from connected SmartCards.  The second slot
+will provide an interface to certificates stored in the operating system
+Keychain.
+.Sh CONFIGURATION
+By default
+.Nm
+will signal to the calling application that the card PIN will be prompted
+out-of-band by the use of the
+.Em CKF_PROTECTED_AUTHENTICATION_PATH
+flag and generate a PIN prompt using a UI dialog box.  If you wish to have
+the application ask for the card PIN, set the
+.Em askPIN 
+.Em defaults
+option to a list of applications that you wish to have prompt for the PIN.
+Example:
+.Bl -tag -width Ds
+.Bd -unfilled
+defaults write mil.navy.nrl.cmf.pkcs11 askPIN -array-add firefox
+.Ed
+.El
+.Sh DEBUGGING
+.Nm
+logs using the
+.Em os_log
+facility at the debug level, using the predicate
+.Em mil.navy.nrl.cmf.pkcs11 .
+These logs can be viewed using
+.Em Console
+or the
+.Em log
+command.  For example:
+.Bl -tag -width Ds
+.Bd -unfilled
+log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
+.Ed
+.El
 .Sh SEE ALSO
 .Xr sc_auth 8 ,
 .Xr security 1 ,
+.Xr defaults 1 ,
+.Xr log 1 ,
 .Xr SmartCardServices 7

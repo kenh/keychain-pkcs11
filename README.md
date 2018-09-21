@@ -127,9 +127,9 @@ This will produce a lot of output, so you may want to redirect this to a file.
 
 ## Caveats
 
-Currently all that Keychain-PKCS11 supports are signing (`C_Sign`) and
-signature verification (`C_Verify`).  Other functions will be added in
-the future.
+Currently Keychain-PKCS11 supports most commonly used PKCS#11
+cryptographic functions, including `C_Sign`, `C_Verify`,
+`C_Encrypt`, and `C_Decrypt`.  Other functions may be added in the future.
 
 By default Keychain-PKCS11 will return the `CKF_PROTECTED_AUTHENTICATION_PATH`
 flag in the token information structure to indicate that the PIN should NOT
