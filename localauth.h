@@ -20,6 +20,4 @@ void lacontext_free(void *);
 CK_RV lacontext_auth(void *, unsigned char *, size_t, void *, enum la_keyusage);
 void lacontext_logout(void *);
 
-extern os_log_t logsys;
-
 #endif /* __LOCALAUTH_H__ */

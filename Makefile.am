@@ -16,6 +16,7 @@ check_PROGRAMS = pkcs11_test
 
 keychain_pkcs11_la_SOURCES = \
 			keychain_pkcs11.c \
+			keychain_pkcs11.h \
 			debug.c \
 			debug.h \
 			tables.c \

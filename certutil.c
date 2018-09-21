@@ -6,8 +6,10 @@
 #include <Security/Security.h>
 #include <Security/SecAsn1Coder.h>
 #include <Security/SecAsn1Templates.h>
+#include <Security/SecDigestTransform.h>
 
 #include "certutil.h"
+#include "keychain_pkcs11.h"
 #include "config.h"
 
 /*
@@ -96,6 +98,61 @@ static const SecAsn1Template cert_template[] = {
 };
 
 /*
+ * More code to extract out the common name from an DER-encoded Name
+ * field; we need this for dumping out things like a CKA_ISSUER when it
+ * is passed down in FindObject search parameters
+ *
+ * A Name is a (ignoring first CHOICE, which is invisible to us):
+ *
+ * SEQUENCE OF RelativeDistinguisedNames
+ *
+ * RelativeDistinguishedNames are a SET OF ATVs (Attribute Type and Values)
+ *
+ * ATVs are a SEQUENCE { OID, VALUE } where VALUE is a CHOICE of String types.
+ */
+
+struct atv {
+	SecAsn1Oid	oid;	/* AttributeType */
+	SecAsn1Item	value;	/* AttributeValue */
+};
+
+struct rdn {
+	struct atv	**atvs;	/* AttributeTypeAndValue */
+};
+
+struct name {
+	struct rdn	**rdns;	/* RelativeDistinguishedName */
+};
+
+static const SecAsn1Template atv_template[] = {
+	{ SEC_ASN1_SEQUENCE, 0, NULL, sizeof(struct atv) },
+	{ SEC_ASN1_OBJECT_ID, offsetof(struct atv, oid), NULL, 0 },
+	{ SEC_ASN1_ANY_CONTENTS, offsetof(struct atv, value), NULL, 0 },
+	{ 0, 0, NULL, 0 },
+};
+
+static const SecAsn1Template rdn_template[] = {
+	{ SEC_ASN1_SET_OF, offsetof(struct rdn, atvs), atv_template,
+							sizeof(struct rdn) },
+};
+
+/*
+ * We probably don't need the sizeof(struct name) at the end of this one,
+ * but we included it in case we ever nest it in something else
+ */
+
+static const SecAsn1Template name_template[] = {
+	{ SEC_ASN1_SEQUENCE_OF, offsetof(struct name, rdns), rdn_template,
+						sizeof(struct name) },
+};
+
+/*
+ * The encoded OID for a commonName
+ */
+
+static const unsigned char cn_oid[] = { 0x55, 0x04, 0x03 };	/* 2.5.4.3 */
+
+/*
  * Extract out the DER-encoded certificate subject
  */
 
@@ -115,8 +172,10 @@ get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
 
 	ret = SecAsn1CoderCreate(&coder);
 
-	if (ret)
+	if (ret) {
+		LOG_SEC_ERR("SecAsn1CreateCoder failed: %@", ret);
 		return false;
+	}
 
 	memset(&cinfo, 0, sizeof(cinfo));
 
@@ -130,6 +189,7 @@ get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
 
 	if (ret) {
 		SecAsn1CoderRelease(coder);
+		LOG_SEC_ERR("SecAsn1Decode failed: %@", ret);
 		return false;
 	}
 
@@ -148,4 +208,114 @@ get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
 	SecAsn1CoderRelease(coder);
 
 	return true;
+}
+
+/*
+ * Find the commonName out of a full DER-encoded Name
+ */
+
+char *
+get_common_name(unsigned char *name, unsigned int namelen)
+{
+	SecAsn1CoderRef coder = NULL;
+	struct name cname;
+	OSStatus ret;
+	int i, j;
+	char *str;
+
+	ret = SecAsn1CoderCreate(&coder);
+
+	if (ret) {
+		LOG_SEC_ERR("SecAsn1CreateCoder failed: %@", ret);
+		str = strdup("Unknown Name");
+		goto out;
+	}
+
+	memset(&cname, 0, sizeof(cname));
+
+	ret = SecAsn1Decode(coder, name, namelen, name_template, &cname);
+
+	if (ret) {
+		LOG_SEC_ERR("SecAsn1Decode failed: %@", ret);
+		str = strdup("Unparsable Name");
+		goto out;
+	}
+
+	/*
+	 * Look through each rdns/atv for the first common name we find
+	 */
+
+	for (i = 0; cname.rdns[i] != NULL; i++) {
+		struct rdn *rdn = cname.rdns[i];
+
+		for (j = 0; rdn->atvs[j] != NULL; j++) {
+			struct atv *atv = rdn->atvs[j];
+
+			if (atv->oid.Length == sizeof(cn_oid) &&
+			    memcmp(atv->oid.Data, cn_oid,
+				   sizeof(cn_oid)) == 0) {
+				/*
+				 * A match!
+				 */
+
+				size_t len = atv->value.Length;
+
+				str = malloc(len + 1);
+
+				strncpy(str, (char *) atv->value.Data, len);
+				str[len] = '\0';
+				goto out;
+			}
+		}
+	}
+
+	str = strdup("No Common Name Found");
+
+out:
+	if (coder)
+		SecAsn1CoderRelease(coder);
+
+	return str;
+}
+
+/*
+ * Calculate the specified digest.  Sigh.  This SecTransform API is really
+ * more complicated than I would want.
+ */
+
+CFDataRef
+get_hash(CFTypeRef digest, CFIndex size, CFDataRef input)
+{
+	SecTransformRef tr;
+	CFErrorRef err = NULL;
+	CFDataRef result = NULL;
+
+	tr = SecDigestTransformCreate(digest, size, &err);
+
+	if (! tr) {
+		os_log_debug(logsys, "SecDigestTransformCreate failed: "
+			     "%{public}@", err);
+		goto out;
+	}
+
+	if (!SecTransformSetAttribute(tr, kSecTransformInputAttributeName,
+				      input, &err)) {
+		os_log_debug(logsys, "SetTransformSetAttribute failed: "
+			     "%{public}@", err);
+		goto out;
+	}
+
+	result = SecTransformExecute(tr, &err);
+
+	if (! result)
+		os_log_debug(logsys, "SecTransformExecute failed: %{public}@",
+			     err);
+
+out:
+	if (err)
+		CFRelease(err);
+	if (tr)
+		CFRelease(tr);
+
+	return result;
 }

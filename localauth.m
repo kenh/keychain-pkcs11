@@ -62,8 +62,7 @@
 
 #import <LocalAuthentication/LocalAuthentication.h>
 
-#include <os/log.h>
-
+#include "keychain_pkcs11.h"
 #include "mypkcs11.h"
 #include "localauth.h"
 

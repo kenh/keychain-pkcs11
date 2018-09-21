@@ -5,7 +5,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #include <dispatch/dispatch.h>
-#include <os/log.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +13,7 @@
 #include <pthread.h>
 
 #include "mypkcs11.h"
+#include "keychain_pkcs11.h"
 #include "localauth.h"
 #include "certutil.h"
 #include "debug.h"
@@ -255,7 +255,7 @@ static void sess_list_free(void);
 do { \
 	LOCK_MUTEX(sess_mutex); \
 	session--; \
-	if (session > sess_list_count || sess_list[session] == NULL) { \
+	if (session >= sess_list_count || sess_list[session] == NULL) { \
 		os_log_debug(logsys, "Session handle %lu is invalid, " \
 			     "returning CKR_SESSION_HANDLE_INVALID", session); \
 		UNLOCK_MUTEX(sess_mutex); \
@@ -351,19 +351,6 @@ void dumpdict(const char *, CFDictionaryRef);
 static void log_init(void *);
 os_log_t logsys;
 static dispatch_once_t loginit;
-
-/*
- * I guess the API lied; os_log_debug() REALLY can't take a const char *,
- * it has to be a string constant.  Dammit.  End the string in a "%@" to
- * print the error string.
- */
-
-#define LOG_SEC_ERR(fmt, errnum) \
-do { \
-	CFStringRef errstr = SecCopyErrorMessageString(errnum, NULL); \
-	os_log_debug(logsys, fmt, errstr); \
-	CFRelease(errstr); \
-} while (0)
 
 /*
  * Declarations for our list of exported PKCS11 functions that we return
@@ -963,6 +950,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		if (sess_list[i] == NULL) {
 			sess_list[i] = sess;
 			*session = i + 1;
+			if (i >= sess_list_count)
+				sess_list_count = i + 1;
 			goto out;
 		}
 	}
@@ -1043,9 +1032,6 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		     (int) session, session_info);
 
 	CHECKSESSION(session, se);
-
-	if (session > sess_list_count || sess_list[session] == NULL)
-		RET(C_GetSessionInfo, CKR_SESSION_HANDLE_INVALID);
 
 	if (!session_info)
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
@@ -3559,6 +3545,7 @@ build_cert_objects(void)
 	for (i = 0; i < cert_list_count; i++) {
 		SecCertificateRef cert = cert_list[i].cert;
 		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
+		CFDataRef hash = NULL;
 		CFStringRef subjstr;
 		char *subjc;
 
@@ -3589,6 +3576,7 @@ build_cert_objects(void)
 		ADD_ATTR_SIZE(cert, CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
 		get_certificate_info(d, &serial, &issuer, &subject);
+		hash = get_hash(kSecDigestSHA1, 0, d);
 		CFRelease(d);
 
 		if (subject)
@@ -3621,12 +3609,18 @@ build_cert_objects(void)
 			ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER,
 				      CFDataGetBytePtr(serial),
 				      CFDataGetLength(serial));
+		if (hash)
+			ADD_ATTR_SIZE(cert, CKA_CERT_SHA1_HASH,
+				      CFDataGetBytePtr(hash),
+				      CFDataGetLength(hash));
 
 		ADD_ATTR(cert, CKA_TRUST_SERVER_AUTH, trust);
 		ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, trust);
 		ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, trust);
 		ADD_ATTR(cert, CKA_TRUST_CODE_SIGNING, trust);
+#if 0
 		ADD_ATTR(cert, CKA_TRUST_STEP_UP_APPROVED, trust);
+#endif
 
 		NEW_OBJECT(cert);
 
@@ -3636,6 +3630,8 @@ build_cert_objects(void)
 			CFRelease(issuer);
 		if (serial)
 			CFRelease(serial);
+		if (hash)
+			CFRelease(hash);
 	}
 }
 
@@ -3746,6 +3742,8 @@ find_attribute(struct obj_info *obj, CK_ATTRIBUTE_TYPE type)
 static void
 dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
 {
+	char *cn;
+
 	if (!os_log_debug_enabled(logsys))
 		return;
 
@@ -3753,6 +3751,18 @@ dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
 	case CKA_CLASS:
 		os_log_debug(logsys, "%s: CKA_CLASS: %s", str,
 			     getCKOName(*((CK_OBJECT_CLASS *) attr->pValue)));
+		break;
+	case CKA_SUBJECT:
+	case CKA_ISSUER:
+		cn = get_common_name(attr->pValue, attr->ulValueLen);
+		os_log_debug(logsys, "%s: %s: %{public}s", str,
+			     getCKAName(attr->type), cn);
+		free(cn);
+		break;
+	case CKA_TOKEN:
+		os_log_debug(logsys, "%s: %s: %{bool}d", str,
+			     getCKAName(attr->type),
+			     (int) ((unsigned char *) attr->pValue)[0]);
 		break;
 	default:
 		os_log_debug(logsys, "%s: %s, len = %lu, val = %p", str,
