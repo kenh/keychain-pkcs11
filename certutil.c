@@ -173,7 +173,7 @@ get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
 	ret = SecAsn1CoderCreate(&coder);
 
 	if (ret) {
-		LOG_SEC_ERR("SecAsn1CreateCoder failed: %@", ret);
+		LOG_SEC_ERR("SecAsn1CreateCoder failed: %{public}@", ret);
 		return false;
 	}
 
@@ -189,7 +189,7 @@ get_certificate_info(CFDataRef certdata, CFDataRef *serialnumber,
 
 	if (ret) {
 		SecAsn1CoderRelease(coder);
-		LOG_SEC_ERR("SecAsn1Decode failed: %@", ret);
+		LOG_SEC_ERR("SecAsn1Decode failed: %{public}@", ret);
 		return false;
 	}
 
@@ -226,7 +226,7 @@ get_common_name(unsigned char *name, unsigned int namelen)
 	ret = SecAsn1CoderCreate(&coder);
 
 	if (ret) {
-		LOG_SEC_ERR("SecAsn1CreateCoder failed: %@", ret);
+		LOG_SEC_ERR("SecAsn1CreateCoder failed: %{public}@", ret);
 		str = strdup("Unknown Name");
 		goto out;
 	}
@@ -236,7 +236,7 @@ get_common_name(unsigned char *name, unsigned int namelen)
 	ret = SecAsn1Decode(coder, name, namelen, name_template, &cname);
 
 	if (ret) {
-		LOG_SEC_ERR("SecAsn1Decode failed: %@", ret);
+		LOG_SEC_ERR("SecAsn1Decode failed: %{public}@", ret);
 		str = strdup("Unparsable Name");
 		goto out;
 	}

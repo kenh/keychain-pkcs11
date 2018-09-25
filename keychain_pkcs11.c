@@ -2135,7 +2135,8 @@ scan_identities(void)
 				goto rebuild;
 			}
 		} else {
-			LOG_SEC_ERR("SecItemCopyMatching failed: %@", ret);
+			LOG_SEC_ERR("SecItemCopyMatching failed: "
+				    "%{public}@", ret);
 			return -1;
 		}
 	}
@@ -2352,7 +2353,7 @@ add_identity(CFDictionaryRef dict)
 
 	if (ret) {
 		LOG_SEC_ERR("Persistent ref SecItemCopyMatching "
-			    "failed: %@", ret);
+			    "failed: %{public}@", ret);
 		return -1;
 	}
 
@@ -2441,13 +2442,13 @@ add_identity(CFDictionaryRef dict)
 	ret = SecIdentityCopyCertificate(id_list[i].ident, &id_list[i].cert);
 
 	if (ret)
-		LOG_SEC_ERR("CopyCertificate failed: %@", ret);
+		LOG_SEC_ERR("CopyCertificate failed: %{public}@", ret);
 
 	if (! ret) {
 		ret = SecIdentityCopyPrivateKey(id_list[i].ident,
 						&id_list[i].privkey);
 		if (ret)
-			LOG_SEC_ERR("CopyPrivateKey failed: %@", ret);
+			LOG_SEC_ERR("CopyPrivateKey failed: %{public}@", ret);
 		else {
 			if (! (id_list[i].secaccess =
 					getaccesscontrol(dict)))
@@ -2459,7 +2460,7 @@ add_identity(CFDictionaryRef dict)
 		ret = SecCertificateCopyPublicKey(id_list[i].cert,
 						  &id_list[i].pubkey);
 		if (ret)
-			LOG_SEC_ERR("CopyPublicKey failed: %@", ret);
+			LOG_SEC_ERR("CopyPublicKey failed: %{public}@", ret);
 	}
 
 	/*
@@ -2636,7 +2637,7 @@ scan_certificates(void)
 			goto out;
 		} else {
 			LOG_SEC_ERR("Certificate SecItemCopyMatching "
-				    "failed: %@", ret);
+				    "failed: %{public}@", ret);
 			goto out;
 		}
 	}
@@ -2782,7 +2783,7 @@ cn_match(const void *value, void *context)
 	ret = SecCertificateCopyCommonName(cert, &cn);
 
 	if (ret) {
-		LOG_SEC_ERR("CopyCommonName failed: %@", ret);
+		LOG_SEC_ERR("CopyCommonName failed: %{public}@", ret);
 		return;
 	}
 
@@ -3088,7 +3089,7 @@ getaccesscontrol(CFDictionaryRef dict)
 
 	if (ret) {
 		LOG_SEC_ERR("Access control ref SecItemCopyMatching "
-			    "failed: %@", ret);
+			    "failed: %{public}@", ret);
 		return NULL;
 	}
 
