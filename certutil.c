@@ -153,6 +153,31 @@ static const SecAsn1Template name_template[] = {
 static const unsigned char cn_oid[] = { 0x55, 0x04, 0x03 };	/* 2.5.4.3 */
 
 /*
+ * A decoding template to extract the modulus and public exponent from
+ * RSAPublicKey encoded data.  Again, we don't need the size in the first
+ * template marking the sequence, but we include it just in case we embed
+ * that in something else later.
+ *
+ * A RSAPublicKey is a SEQUENCE of
+ *
+ * INTEGER (modulus)
+ * INTEGER (publicExponent)
+ */
+
+struct rsa_pubkey {
+	SecAsn1Item	modulus;
+	SecAsn1Item	public_exponent;
+};
+
+static const SecAsn1Template rsapubkey_template[] = {
+	{ SEC_ASN1_SEQUENCE, 0, NULL, sizeof(struct rsa_pubkey) },
+	{ SEC_ASN1_INTEGER, offsetof(struct rsa_pubkey, modulus), NULL, 0 },
+	{ SEC_ASN1_INTEGER, offsetof(struct rsa_pubkey, public_exponent),
+								NULL, 0 },
+	{ 0, 0, NULL, 0 },
+};
+
+/*
  * Extract out the DER-encoded certificate subject
  */
 
@@ -276,6 +301,52 @@ out:
 		SecAsn1CoderRelease(coder);
 
 	return str;
+}
+
+/*
+ * Extract out the modulus and public exponent from a RSAPublicKey
+ */
+
+bool
+get_pubkey_info(CFDataRef pubkeydata, CFDataRef *modulus, CFDataRef *exponent)
+{
+	SecAsn1CoderRef coder = NULL;
+	struct rsa_pubkey pubkey;
+	OSStatus ret;
+
+	ret = SecAsn1CoderCreate(&coder);
+
+	if (ret) {
+		LOG_SEC_ERR("SecAsn1CreateCoder failed: %{public}@", ret);
+		return false;
+	}
+
+	memset(&pubkey, 0, sizeof(pubkey));
+
+	ret = SecAsn1Decode(coder, CFDataGetBytePtr(pubkeydata),
+			    CFDataGetLength(pubkeydata),
+			    rsapubkey_template, &pubkey);
+
+	if (ret) {
+		SecAsn1CoderRelease(coder);
+		LOG_SEC_ERR("SecAsn1Decode failed: %{public}@", ret);
+		return false;
+	}
+
+	/*
+	 * Looks like it all worked!  Return those in CFData structures
+	 */
+
+	*modulus = CFDataCreate(kCFAllocatorDefault, pubkey.modulus.Data,
+				pubkey.modulus.Length);
+
+	*exponent = CFDataCreate(kCFAllocatorDefault,
+				 pubkey.public_exponent.Data,
+				 pubkey.public_exponent.Length);
+
+	SecAsn1CoderRelease(coder);
+
+	return true;
 }
 
 /*

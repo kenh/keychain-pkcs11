@@ -3433,6 +3433,8 @@ build_id_objects(int lock)
 	for (i = 0; i < id_list_count; i++) {
 		SecCertificateRef cert = id_list[i].cert;
 		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
+		CFDataRef keydata = NULL, modulus = NULL, exponent = NULL;
+		CFErrorRef error;
 
 		OBJINIT(id);
 
@@ -3508,6 +3510,30 @@ build_id_objects(int lock)
 				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
+		/*
+		 * I guess some applications want the modulus and public
+		 * exponent as attributes in the private key object.
+		 * Extract those using the public key for this identity.
+		 */
+
+		keydata = SecKeyCopyExternalRepresentation(id_list[i].pubkey,
+							   &error);
+
+		if (keydata) {
+			if (get_pubkey_info(keydata, &modulus, &exponent)) {
+				ADD_ATTR_SIZE(id, CKA_MODULUS,
+					      CFDataGetBytePtr(modulus),
+					      CFDataGetLength(modulus));
+				ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
+					      CFDataGetBytePtr(exponent),
+					      CFDataGetLength(exponent));
+			}
+		} else {
+			os_log_debug(logsys, "SecKeyCopyExternalRepresentation "
+				     "failed: %{public}@", error);
+			CFRelease(error);
+		}
+
 		NEW_OBJECT(id);
 
 		if (subject)
@@ -3516,6 +3542,13 @@ build_id_objects(int lock)
 			CFRelease(issuer);
 		if (serial)
 			CFRelease(serial);
+
+		if (keydata)
+			CFRelease(keydata);
+		if (modulus)
+			CFRelease(modulus);
+		if (exponent)
+			CFRelease(exponent);
 	}
 
 	if (lock)
