@@ -5,8 +5,8 @@ dnl
 
 AC_PREREQ([2.68])
 
-AC_INIT([keychain-pkcs11], [1.0], [kenh@cmf.nrl.navy.mil])
-AC_CONFIG_SRCDIR([pkcs11_test.c])
+AC_INIT([keychain-pkcs11], [0.9], [kenh@cmf.nrl.navy.mil])
+AC_CONFIG_SRCDIR([src/keychain_pkcs11.c])
 AC_CONFIG_MACRO_DIRS([m4])
 AM_INIT_AUTOMAKE([-Wall foreign subdir-objects 1.14])
 AC_PROG_CC([clang])
@@ -20,5 +20,5 @@ LT_INIT([disable-static dlopen])
 AC_CHECK_FUNCS([setprogname])
 
 AC_CONFIG_FILES([Makefile])
-AC_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADER([include/config.h])
 AC_OUTPUT

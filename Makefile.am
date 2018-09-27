@@ -9,27 +9,28 @@
 ACLOCAL_AMFLAGS = -I m4
 
 AM_CFLAGS = -Wall
+AM_CPPFLAGS = -I$(top_srcdir)/include
 
 lib_LTLIBRARIES = keychain-pkcs11.la
-dist_man8_MANS = keychain-pkcs11.man
+dist_man8_MANS = man/keychain-pkcs11.man
 check_PROGRAMS = pkcs11_test
 
 keychain_pkcs11_la_SOURCES = \
-			keychain_pkcs11.c \
-			keychain_pkcs11.h \
-			debug.c \
-			debug.h \
-			tables.c \
-			tables.h \
-			localauth.m \
-			localauth.h \
-			certutil.c \
-			certutil.h \
-			mypkcs11.h \
-			pkcs11.h \
-			pkcs11f.h \
-			pkcs11n.h \
-			pkcs11t.h \
+			src/keychain_pkcs11.c \
+			src/debug.c \
+			src/tables.c \
+			src/localauth.m \
+			src/certutil.c \
+			include/debug.h \
+			include/keychain_pkcs11.h \
+			include/localauth.h \
+			include/tables.h \
+			include/certutil.h \
+			include/mypkcs11.h \
+			include/pkcs11.h \
+			include/pkcs11f.h \
+			include/pkcs11n.h \
+			include/pkcs11t.h \
 			#
 
 keychain_pkcs11_la_LDFLAGS = \
@@ -57,7 +58,12 @@ uninstall-hook:
 ## Sources for our test program; only built by "make check"
 ##
 
-pkcs11_test_SOURCES = pkcs11_test.c pkcs11_test.h debug.c debug.h
+pkcs11_test_SOURCES = \
+		test/pkcs11_test.c \
+		src/debug.c \
+		test/pkcs11_test.h \
+		include/debug.h \
+		#
 
 ##
 ## We add this here so debug.c will be compiled with a different object
