@@ -151,6 +151,7 @@ struct id_info {
 static struct id_info *id_list = NULL;
 static unsigned int id_list_count = 0;		/* Number of valid entries */
 static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
+static bool id_list_init = false;		/* Is ID list initialized? */
 static bool ask_pin = false;			/* Should we ask for a PIN? */
 static bool logged_in = false;			/* Are we logged into card? */
 static void *lacontext = NULL;			/* LocalAuth context */
@@ -584,7 +585,7 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 	LOCK_MUTEX(id_mutex);
 
-	if (! slot_list) {
+	if (! slot_list || ! id_list_init) {
 		if (scan_identities()) {
 			rv = CKR_FUNCTION_FAILED;
 			goto out;
@@ -2120,6 +2121,9 @@ scan_identities(void)
 
 		if (ret == errSecItemNotFound) {
 			os_log_debug(logsys, "No identities found");
+
+			id_list_init = true;
+
 			/*
 			 * If this is the same as before?  If so, then
 			 * just return here
@@ -2211,6 +2215,8 @@ rebuild:
 	 */
 
 	build_id_objects(0);
+
+	id_list_init = true;
 
 out:
 	if (result)
