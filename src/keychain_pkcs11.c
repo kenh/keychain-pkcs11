@@ -3560,6 +3560,9 @@ build_id_objects(int lock)
 				      CFDataGetLength(exponent));
 		}
 
+		b = CK_FALSE;
+		ADD_ATTR(id, CKA_ALWAYS_AUTHENTICATE, b);
+
 		NEW_OBJECT(id);
 
 		if (subject)
