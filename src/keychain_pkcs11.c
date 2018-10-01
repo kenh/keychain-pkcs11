@@ -3496,6 +3496,36 @@ build_id_objects(int lock)
 				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
+		/*
+		 * It turns out some implementations want CKA_MODULUS_BITS,
+		 * and the modulus and public exponent.  For RSA keys the
+		 * modulus size is equal to the block size, and we can get
+		 * modulus and public exponent from the "external
+		 * representation" of the public key.  Note that the block
+		 * size is returned in bytes, and we need bits.
+		 */
+
+		t = SecKeyGetBlockSize(id_list[i].pubkey) * 8;
+		ADD_ATTR(id, CKA_MODULUS_BITS, t);
+
+		keydata = SecKeyCopyExternalRepresentation(id_list[i].pubkey,
+							   &error);
+
+		if (keydata) {
+			if (get_pubkey_info(keydata, &modulus, &exponent)) {
+				ADD_ATTR_SIZE(id, CKA_MODULUS,
+					      CFDataGetBytePtr(modulus),
+					      CFDataGetLength(modulus));
+				ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
+					      CFDataGetBytePtr(exponent),
+					      CFDataGetLength(exponent));
+			}
+		} else {
+			os_log_debug(logsys, "SecKeyCopyExternalRepresentation "
+				     "failed: %{public}@", error);
+			CFRelease(error);
+		}
+
 		NEW_OBJECT(id);
 		OBJINIT(id);
 
@@ -3519,25 +3549,16 @@ build_id_objects(int lock)
 		/*
 		 * I guess some applications want the modulus and public
 		 * exponent as attributes in the private key object.
-		 * Extract those using the public key for this identity.
+		 * Use this information we extracted previously.
 		 */
 
-		keydata = SecKeyCopyExternalRepresentation(id_list[i].pubkey,
-							   &error);
-
 		if (keydata) {
-			if (get_pubkey_info(keydata, &modulus, &exponent)) {
-				ADD_ATTR_SIZE(id, CKA_MODULUS,
-					      CFDataGetBytePtr(modulus),
-					      CFDataGetLength(modulus));
-				ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
-					      CFDataGetBytePtr(exponent),
-					      CFDataGetLength(exponent));
-			}
-		} else {
-			os_log_debug(logsys, "SecKeyCopyExternalRepresentation "
-				     "failed: %{public}@", error);
-			CFRelease(error);
+			ADD_ATTR_SIZE(id, CKA_MODULUS,
+				      CFDataGetBytePtr(modulus),
+				      CFDataGetLength(modulus));
+			ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
+				      CFDataGetBytePtr(exponent),
+				      CFDataGetLength(exponent));
 		}
 
 		NEW_OBJECT(id);
