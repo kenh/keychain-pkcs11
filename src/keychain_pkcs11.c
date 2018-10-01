@@ -907,9 +907,6 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	if (! (flags & CKF_SERIAL_SESSION))
 		RET(C_OpenSession, CKR_SESSION_PARALLEL_NOT_SUPPORTED);
 
-	if (flags & CKF_RW_SESSION)
-		RET(C_OpenSession, CKR_TOKEN_WRITE_PROTECTED);
-
 	sess = malloc(sizeof(*sess));
 	CREATE_MUTEX(sess->mutex);
 
@@ -3449,10 +3446,10 @@ build_id_objects(int lock)
 		 * private key.  Add in attributes we need.
 		 */
 
-		t = i;
 		cl = CKO_CERTIFICATE;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
+		t = i;
 		ADD_ATTR(id, CKA_ID, t);
 		ADD_ATTR(id, CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
@@ -3483,6 +3480,7 @@ build_id_objects(int lock)
 		cl = CKO_PUBLIC_KEY;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
+		t = i;
 		ADD_ATTR(id, CKA_ID, t);
 		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
@@ -3532,6 +3530,7 @@ build_id_objects(int lock)
 		cl = CKO_PRIVATE_KEY;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
+		t = i;
 		ADD_ATTR(id, CKA_ID, t);
 		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
