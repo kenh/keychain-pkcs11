@@ -335,6 +335,7 @@ static void build_cert_objects(void);
 static void sprintfpad(unsigned char *, size_t, const char *, ...);
 static void logtype(const char *, CFTypeRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
+static char *getkeylabel(SecKeyRef);
 static char *getstrcopy(CFStringRef);
 static bool prefkey_found(const char *, const char *);
 #ifdef KEYCHAIN_DEBUG
@@ -2361,7 +2362,7 @@ add_identity(CFDictionaryRef dict)
 	}
 
 	if (CFGetTypeID(refresult) != SecIdentityGetTypeID()) {
-		logtype("Was expecting a SecIdentityRef, but got: ", refresult);
+		logtype("Was expecting a SecIdentityRef, but got", refresult);
 		CFRelease(refresult);
 		return -1;
 	}
@@ -3101,7 +3102,7 @@ getaccesscontrol(CFDictionaryRef dict)
 	 */
 
 	if (CFGetTypeID(attrdict) != CFDictionaryGetTypeID()) {
-		logtype("Was expecting a CFDictionary, but got: ", attrdict);
+		logtype("Was expecting a CFDictionary, but got", attrdict);
 		CFRelease(attrdict);
 		return NULL;
 	}
@@ -3117,6 +3118,129 @@ getaccesscontrol(CFDictionaryRef dict)
 	CFRelease(attrdict);
 
 	return accret;
+}
+
+/*
+ * Return the user-printable label for a key.
+ *
+ * Sigh.  It turns out some applications REALLY want a printable label
+ * associated with a key; we'll fetch the key label from the attribute
+ * dictionary.  Returns string that must always be free()d.
+ */
+
+static char *
+getkeylabel(SecKeyRef key)
+{
+	CFDictionaryRef keyattr = NULL, query = NULL, result = NULL;
+	CFStringRef label;
+	OSStatus ret;
+	char *retstr;
+
+	/*
+	 * Slightly more complicated than I would like, but we're trying to
+	 * conform to the Security framework APIs as I understand them.
+	 *
+	 * Fetch the key attributes using SecKeyCopyAttributes (the label
+	 * isn't one of the supported attributes that SecKeyCopyAttributes
+	 * is supposed to return).
+	 *
+	 * Use the KeyClass and application label in a query dictionary
+	 * to retrieve the complete attribute dictionary, and return the
+	 * kSecAttrLabel value.
+	 */
+
+	/*
+	 * Our query dictionary; see above for greater detail
+	 *
+	 * kSecClass = kSecClassKey
+	 * kSecAttrKeyClass (from key)
+	 * kSecAttrApplicationLabel (from key)
+	 * kSecMatchLimit = kSecMatchLimitOne
+	 * kSecReturnAttributes = kCFBooleanTrue
+	 */
+
+	const void *keys[] = {
+		kSecClass,
+#define KEYCLASS_INDEX 1
+		kSecAttrKeyClass,
+#define KEYLABEL_INDEX 2
+		kSecAttrApplicationLabel,
+		kSecMatchLimit,
+		kSecReturnAttributes,
+	};
+
+	const void *values[] = {
+		kSecClassKey,		/* kSecClass */
+		NULL,			/* kSecAttrKeyClass */
+		NULL,			/* kSecAttrApplicationLabel */
+		kSecMatchLimitOne,	/* kSecMatchLimit */
+		kCFBooleanTrue,		/* kSecReturnAttributes */
+	};
+
+	keyattr = SecKeyCopyAttributes(key);
+
+	if (! keyattr) {
+		os_log_debug(logsys, "SecKeyCopyAttr returned NULL");
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(keyattr, kSecAttrKeyClass,
+					    &values[KEYCLASS_INDEX])) {
+		os_log_debug(logsys, "Cannot find KeyClass in dict");
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(keyattr, kSecAttrApplicationLabel,
+					    &values[KEYLABEL_INDEX])) {
+		os_log_debug(logsys, "Cannot find AppLabel in dict");
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	query = CFDictionaryCreate(NULL, keys, values,
+				   sizeof(keys)/sizeof(keys[0]),
+				   &kCFTypeDictionaryKeyCallBacks,
+				   &kCFTypeDictionaryValueCallBacks);
+
+	if (! query) {
+		os_log_debug(logsys, "Unable to create query dictionary");
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	ret = SecItemCopyMatching(query, (CFTypeRef *) &result);
+
+	if (ret) {
+		LOG_SEC_ERR("SecItemCopyMatching failed: %{public}@", ret);
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	if (CFGetTypeID(result) != CFDictionaryGetTypeID()) {
+		logtype("Was expecting a CFDictionaryRef, but got", result);
+		retstr = strdup("Unknown key");
+		goto out;
+	}
+
+	if (! CFDictionaryGetValueIfPresent(result, kSecAttrLabel,
+					    (const void **) &label)) {
+		os_log_debug(logsys, "Unable to find key label");
+		retstr = strdup("Unknown key");
+	} else {
+		retstr = getstrcopy(label);
+	}
+
+out:
+	if (keyattr)
+		CFRelease(keyattr);
+	if (query)
+		CFRelease(query);
+	if (result)
+		CFRelease(result);
+
+	return retstr;
 }
 
 /*
@@ -3423,6 +3547,7 @@ build_id_objects(int lock)
 	CK_ULONG t;
 	CK_BBOOL b;
 	CFDataRef d;
+	char *label;
 
 	if (lock)
 		LOCK_MUTEX(id_mutex);
@@ -3495,6 +3620,21 @@ build_id_objects(int lock)
 				      CFDataGetLength(subject));
 
 		/*
+		 * Sigh.  It seems like the public part of an identity
+		 * doesn't actually get a label attribute, at least with
+		 * the release I tested.  So for now, get the label from
+		 * the identity label, and maybe check later if this
+		 * changes; keep the code around here if it does.
+		 *
+		 * label = getkeylabel(id_list[i].pubkey);
+		 * ADD_ATTR_SIZE(id, CKA_LABEL, label, strlen(label));
+		 * free(label);
+		 */
+
+		ADD_ATTR_SIZE(id, CKA_LABEL, id_list[i].label,
+			      strlen(id_list[i].label));
+
+		/*
 		 * It turns out some implementations want CKA_MODULUS_BITS,
 		 * and the modulus and public exponent.  For RSA keys the
 		 * modulus size is equal to the block size, and we can get
@@ -3524,6 +3664,10 @@ build_id_objects(int lock)
 			CFRelease(error);
 		}
 
+		b = CK_FALSE;
+		ADD_ATTR(id, CKA_WRAP, b);
+		ADD_ATTR(id, CKA_DERIVE, b);
+
 		NEW_OBJECT(id);
 		OBJINIT(id);
 
@@ -3545,6 +3689,10 @@ build_id_objects(int lock)
 				      CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
+		label = getkeylabel(id_list[i].privkey);
+		ADD_ATTR_SIZE(id, CKA_LABEL, label, strlen(label));
+		free(label);
+
 		/*
 		 * I guess some applications want the modulus and public
 		 * exponent as attributes in the private key object.
@@ -3562,6 +3710,9 @@ build_id_objects(int lock)
 
 		b = CK_FALSE;
 		ADD_ATTR(id, CKA_ALWAYS_AUTHENTICATE, b);
+		b = CK_FALSE;
+		ADD_ATTR(id, CKA_UNWRAP, b);
+		ADD_ATTR(id, CKA_DERIVE, b);
 
 		NEW_OBJECT(id);
 
