@@ -146,6 +146,7 @@ struct id_info {
 	bool			privcandecrypt;	/* Can privkey decrypt? */
 	bool			pubcanverify;	/* Can pubkey verify? */
 	bool			pubcanencrypt;	/* Can pubkey encrypt? */
+	bool			pubcanwrap;	/* Can pubkey wrap? */
 };
 
 static struct id_info *id_list = NULL;
@@ -2478,6 +2479,18 @@ add_identity(CFDictionaryRef dict)
 						        kSecAttrCanVerify);
 		id_list[i].pubcanencrypt = boolfromdict("Can-Encrypt", keydict,
 							kSecAttrCanEncrypt);
+		id_list[i].pubcanwrap = boolfromdict("Can-Wrap", keydict,
+						     kSecAttrCanWrap);
+		/*
+		 * We're going to cheat here JUST a bit.  It turns out
+		 * if a public key is set to allow wrapping, it can also
+		 * do generic encryption.  So if we have wrapping set, also
+		 * set encryption.
+		 */
+
+		if (id_list[i].pubcanwrap)
+			id_list[i].pubcanencrypt = true;
+
 		CFRelease(keydict);
 	}
 
