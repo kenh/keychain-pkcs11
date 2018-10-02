@@ -19,6 +19,16 @@ LT_INIT([disable-static dlopen])
 
 AC_CHECK_FUNCS([setprogname])
 
+default_APPIDENTIFIER="mil.navy.nrl.cmf.pkcs11"
+AC_ARG_VAR([APPIDENTIFIER],
+	   [Application bundle identifier of package, defaults to 'mil.navy.nrl.cmf.pkcs11'])
+
+: "${APPIDENTIFIER=$default_APPIDENTIFIER}"
+
+AC_DEFINE_UNQUOTED([APPIDENTIFIER], ["$APPIDENTIFIER"],
+	[Application bundle identifier of package])
+AC_SUBST([APPIDENTIFIER])
+
 AC_CONFIG_FILES([Makefile])
 AC_CONFIG_HEADER([include/config.h])
 AC_OUTPUT

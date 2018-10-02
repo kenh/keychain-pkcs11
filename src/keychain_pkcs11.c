@@ -20,12 +20,6 @@
 #include "tables.h"
 #include "config.h"
 
-/*
- * The domain we use for our application; used by log messages and preferences
- */
-
-#define APP_DOMAIN "mil.navy.nrl.cmf.pkcs11"
-
 /* We currently support 2.40 of Cryptoki */
 
 #define CK_MAJOR_VERSION 2
@@ -3302,7 +3296,7 @@ cfgetindex(CFTypeRef ref, unsigned int index)
 static void
 log_init(void *context)
 {
-	logsys = os_log_create(APP_DOMAIN, "general");
+	logsys = os_log_create(APPIDENTIFIER, "general");
 }
 
 /*
@@ -4015,7 +4009,7 @@ prefkey_found(const char *key, const char *value)
 
 	keyref = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-	propref = CFPreferencesCopyAppValue(keyref, CFSTR(APP_DOMAIN));
+	propref = CFPreferencesCopyAppValue(keyref, CFSTR(APPIDENTIFIER));
 	CFRelease(keyref);
 
 	if (! propref)
