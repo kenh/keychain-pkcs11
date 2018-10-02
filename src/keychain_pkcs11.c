@@ -774,7 +774,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 
 	case CERTIFICATE_SLOT:
 		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
-			   "Keychain Certificate Virtual Token");
+			   "Keychain Certificates");
 		break;
 	}
 
