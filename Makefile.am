@@ -46,6 +46,7 @@ keychain_pkcs11_la_LDFLAGS = \
 ## link in the installation directory so programs that want a .dylib will
 ## work
 
+.PHONY: install-exec-hook uninstall-hook
 install-exec-hook:
 	cd $(DESTDIR)$(libdir) && \
 		rm -f keychain-pkcs11.dylib && \
@@ -77,3 +78,20 @@ pkcs11_test_CFLAGS = $(AM_CFLAGS)
 ##
 
 EXTRA_DIST = README.md
+
+##
+## A rule to build our distribution package
+##
+
+
+PACKAGEBUILDDIR=/tmp/packagebuild
+CLEANFILES=$(PACKAGE_NAME)-*.pkg
+.PHONY: package
+package:
+	rm -rf $(PACKAGEBUILDDIR)
+	$(MAKE) install DESTDIR=$(PACKAGEBUILDDIR)
+	pkgbuild \
+		--root "$(PACKAGEBUILDDIR)$(prefix)" \
+		--identifier "$(APPIDENTIFIER)" \
+		--install-location "$(prefix)" \
+		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
