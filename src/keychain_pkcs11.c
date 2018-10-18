@@ -283,6 +283,7 @@ static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
 static bool cert_list_initialized = false;
+static bool cert_list_enabled = false;
 
 static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
 static unsigned int cert_obj_count = 0;		/* Cert object list count */
@@ -294,6 +295,11 @@ static unsigned int cert_obj_size = 0;		/* Size of identity obj_list */
 
 static const char *default_cert_search[] = {
 	"DoD Root CA",
+	NULL,
+};
+
+static const char *default_cert_applist[] = {
+	"firefox",
 	NULL,
 };
 
@@ -332,7 +338,9 @@ static void logtype(const char *, CFTypeRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 static char *getkeylabel(SecKeyRef);
 static char *getstrcopy(CFStringRef);
-static bool prefkey_found(const char *, const char *);
+static bool prefkey_found(const char *, const char *, const char **);
+static char **prefkey_arrayget(const char *, const char **);
+static void array_free(char **);
 #ifdef KEYCHAIN_DEBUG
 void dumpdict(const char *, CFDictionaryRef);
 #endif /* KEYCHAIN_DEBUG */
@@ -478,7 +486,7 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 
 	progname = getprogname();
 
-	if (! prefkey_found("askPIN", progname)) {
+	if (! prefkey_found("askPIN", progname, NULL)) {
 		os_log_debug(logsys, "Program \"%{public}s\" is NOT set to "
 			     "ask for PIN, will let Security ask for the PIN",
 			     progname);
@@ -488,6 +496,22 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 			     "for a PIN, we will prompt for the PIN",
 			     progname);
 		ask_pin = true;
+	}
+
+	/*
+	 * Also check to see if this application will create the default
+	 * Keychain certificate slot.
+	 */
+
+	if (! prefkey_found("keychainCertSlot", progname,
+			    default_cert_applist)) {
+		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
+			     "Certificate slot DISABLED", progname);
+		cert_list_enabled = false;
+	} else {
+		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
+			     "Certificate slot ENABLED", progname);
+		cert_list_enabled = true;
 	}
 
 	initialized = 1;
@@ -528,6 +552,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	use_mutex = 0;
 	initialized = 0;
+	cert_list_enabled = 0;
 
 	RET(C_Finalize, CKR_OK);
 }
@@ -3993,6 +4018,84 @@ dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
 }
 
 /*
+ * Fetch a preferences key from our dictionary.  If not found, return a
+ * default-provided list.  If there are no defaults, return NULL.
+ *
+ * Returns storage that must always be free()d.
+ */
+
+static char **
+prefkey_arrayget(const char *key, const char **default_list)
+{
+	CFTypeID id;
+	CFPropertyListRef propref;
+	CFStringRef keyref;
+	char **ret;
+
+	keyref = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
+
+	propref = CFPreferencesCopyAppValue(keyref, CFSTR(APPIDENTIFIER));
+	CFRelease(keyref);
+
+	if (! propref) {
+		/*
+		 * We didn't find any matching key.  If we have a default
+		 * list then return the copy of it.  If we don't, return NULL.
+		 */
+
+		unsigned int dsize = 0, i;
+
+		if (! default_list)
+			return NULL;
+
+		while (default_list[dsize])
+			dsize++;
+
+		ret = malloc(sizeof(char *) * (dsize + 1));
+
+		for (i = 0; i < dsize; i++)
+			ret[i] = strdup(default_list[i]);
+
+		ret[i] = NULL;
+
+		return ret;
+	}
+
+	/*
+	 * We only handle a CFStringRef or a CFArrayRef
+	 */
+
+	id = CFGetTypeID(propref);
+
+	if (id == CFStringGetTypeID()) {
+		/*
+		 * Just make a two-element array and return the string
+		 */
+
+		ret = malloc(sizeof(char *) * 2);
+
+		ret[0] = getstrcopy(propref);
+		ret[1] = NULL;
+	} else if (id == CFArrayGetTypeID()) {
+		unsigned int i, count = CFArrayGetCount(propref);
+
+		ret = malloc(sizeof(char *) * (count + 1));
+
+		for (i = 0; i < count; i++)
+			ret[i] = getstrcopy(CFArrayGetValueAtIndex(propref, i));
+
+		ret[i] = NULL;
+	} else {
+		logtype("Unknown preference return type", propref);
+		ret = NULL;
+	}
+
+	CFRelease(propref);
+
+	return ret;
+}
+
+/*
  * See if a particular key is set in our preferences dictionary.
  *
  * It may be a single string, or an array (that's all we support right now).
@@ -4000,49 +4103,60 @@ dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
  */
 
 static bool
-prefkey_found(const char *key, const char *value)
+prefkey_found(const char *key, const char *value, const char **default_list)
 {
-	CFTypeID id;
-	CFPropertyListRef propref;
-	CFStringRef keyref, valref;
+	char **strlist, **p;
 	bool ret = false;
 
-	keyref = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
+	strlist = prefkey_arrayget(key, default_list);
 
-	propref = CFPreferencesCopyAppValue(keyref, CFSTR(APPIDENTIFIER));
-	CFRelease(keyref);
-
-	if (! propref)
+	if (! strlist)
 		return false;
 
-	valref = CFStringCreateWithCString(NULL, value, kCFStringEncodingUTF8);
+	/*
+	 * We are guaranteed at least one entry.  If it is "all" or "none"
+	 * then do the obvious things.
+	 */
 
-	id = CFGetTypeID(propref);
-
-	if (id == CFStringGetTypeID()) {
-		/*
-		 * If this is a string, then it's a single application
-		 * name.  See if it is equal.
-		 */
-		ret = CFEqual(valref, propref);
-	} else if (id == CFArrayGetTypeID()) {
-		/*
-		 * This should be a list of application names, so
-		 * search the array to see if our key is in there.
-		 * They should be a series of CFStrings.
-		 */
-		ret = CFArrayContainsValue(propref,
-				     CFRangeMake(0, CFArrayGetCount(propref)),
-				     valref);
-	} else {
-		logtype("Unknown preference return type", propref);
+	if (strcasecmp(strlist[0], "all") == 0)
+		ret = true;
+	else if (strcasecmp(strlist[0], "none") == 0)
 		ret = false;
+	else {
+		/*
+		 * Return "true" if we find a match
+		 */
+
+		for (p = strlist; p != NULL; p++) {
+			if (strcasecmp(*p, value) == 0) {
+				ret = true;
+				break;
+			}
+		}
 	}
 
-	CFRelease(valref);
-	CFRelease(propref);
+	array_free(strlist);
 
 	return ret;
+}
+
+/*
+ * Free an array of characters (usually something returned by a prefkey
+ * function)
+ */
+
+static void
+array_free(char **array)
+{
+	char **p = array;
+
+	if (! array)
+		return;
+
+	while (*p != NULL)
+		free(*p++);
+
+	free(array);
 }
 
 /*
