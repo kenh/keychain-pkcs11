@@ -41,6 +41,11 @@ do { \
 			     "CKR_SLOT_ID_INVALID", slot); \
 		return CKR_SLOT_ID_INVALID; \
 	} \
+	if (slot == CERTIFICATE_SLOT && ! cert_slot_enabled) { \
+		os_log_debug(logsys, "Requested cert slot (%lu) but is " \
+			     "disabled, returning CKR_SLOT_ID_INVALID", slot); \
+		return CKR_SLOT_ID_INVALID; \
+	} \
 } while (0)
 
 /*
@@ -283,7 +288,7 @@ static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
 static bool cert_list_initialized = false;
-static bool cert_list_enabled = false;
+static bool cert_slot_enabled = false;
 
 static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
 static unsigned int cert_obj_count = 0;		/* Cert object list count */
@@ -507,11 +512,11 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 			    default_cert_applist)) {
 		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
 			     "Certificate slot DISABLED", progname);
-		cert_list_enabled = false;
+		cert_slot_enabled = false;
 	} else {
 		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
 			     "Certificate slot ENABLED", progname);
-		cert_list_enabled = true;
+		cert_slot_enabled = true;
 	}
 
 	initialized = 1;
@@ -552,7 +557,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	use_mutex = 0;
 	initialized = 0;
-	cert_list_enabled = 0;
+	cert_slot_enabled = 0;
 
 	RET(C_Finalize, CKR_OK);
 }
@@ -627,27 +632,29 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 
 	if (!token_present || id_list_count > 0) {
 		if (slot_list) {
-			if (*slot_num < 2)
+			if (*slot_num < (cert_slot_enabled ? 2 : 1))
 				rv = CKR_BUFFER_TOO_SMALL;
 			else {
 				slot_list[0] = TOKEN_SLOT;
-				slot_list[1] = CERTIFICATE_SLOT;
+				if (cert_slot_enabled)
+					slot_list[1] = CERTIFICATE_SLOT;
 			}
 		}
-		*slot_num = 2;
+		*slot_num = cert_slot_enabled ? 2 : 1;
 	} else {
 		/*
 		 * If we're here, token_present is TRUE and we have no
 		 * identities, so only return the certificate slot
+		 * (if it is enabled)
 		 */
-		if (slot_list) {
+		if (slot_list && cert_slot_enabled) {
 			if (*slot_num < 1)
 				rv = CKR_BUFFER_TOO_SMALL;
 			else {
 				slot_list[0] = CERTIFICATE_SLOT;
 			}
 		}
-		*slot_num = 1;
+		*slot_num = cert_slot_enabled ? 1 : 0;
 	}
 
 out:
@@ -4127,7 +4134,7 @@ prefkey_found(const char *key, const char *value, const char **default_list)
 		 * Return "true" if we find a match
 		 */
 
-		for (p = strlist; p != NULL; p++) {
+		for (p = strlist; *p != NULL; p++) {
 			if (strcasecmp(*p, value) == 0) {
 				ret = true;
 				break;
