@@ -19,22 +19,74 @@ identities that are available from connected SmartCards.  The second slot
 will provide an interface to certificates stored in the operating system
 Keychain.
 .Sh CONFIGURATION
-By default
+The behavior of
 .Nm
-will signal to the calling application that the card PIN will be prompted
-out-of-band by the use of the
+can be configured by a number of preference keys, configurable via
+the
+.Xr defaults 1
+command.  All of these preference keys are under the domain
+.Em mil.navy.nrl.cmf.pkcs11 .
+All preference keys should either be configured as strings or arrays of
+strings (using the
+.Fl array
+or
+.Fl array-add
+options to
+.Xr defaults 1 ) .
+.Bl -tag -width "keychainCertSlot"
+.It Sy askPIN
+Normally
+.Nm
+will signal to the calling application that the card PIN will be entered
+out-of-band (not via the PKCS#11 API) by the use of the
 .Em CKF_PROTECTED_AUTHENTICATION_PATH
 flag and generate a PIN prompt using a UI dialog box.  If you wish to have
-the application ask for the card PIN, set the
-.Em askPIN 
-.Em defaults
-option to a list of applications that you wish to have prompt for the PIN.
-Example:
-.Bl -tag -width Ds
-.Bd -unfilled
-defaults write mil.navy.nrl.cmf.pkcs11 askPIN -array-add firefox
-.Ed
+the application ask for the card PIN, the
+.Sy askPIN
+preference can be used to list applications that will be instead configured
+to prompt for the card PIN internally.
+.Pp
+By default no applications will be configured to ask for a PIN via the
+PKCS#11 API.
+.It Sy keychainCertSlot
+This contains a list of application names that will have a second
+virtual token slot configured that contains certificates found in
+system Keychains, along with appropriate Netscape Trust Objects.
+This may impact performance depending on the number of certificates
+stored in system Keychains, so you may only wish to use this for
+certain applications.
+.Pp
+The certificates included in this slot will include all certificates
+who's common name matches one of the strings found in the
+.Sy certificateList
+preference (see below), and all certificates issued by any of the matching
+certificates.
+.Pp
+By default only the application
+.Dq Em firefox
+will have the Keychain certificates available. If you set this preference
+key it will override the default, so you must also include
+.Em firefox
+in the list of applications if you want to have it enabled.
+.It Sy certificateList
+This contains a list of strings that will be used to match on the common
+name of certificates in the system Keychains.  The matching is done
+in a case-sensitive manner, but only a substring match is required.
+Matching certificates will be included in the certificate slot (see above).
+.Pp
+All certificates issued by matching certificates are also included in
+the certificate slot, so it is generally only necessary to specify root
+CAs; all intermediate certificates should be automatically included.
+.Pp
+The default value for this preference is the string
+.Dq Em "DoD Root CA" .
 .El
+.Pp
+All application preference keys support the special values of
+.Dq Em all
+and
+.Dq Em none
+which will enable that feature for all and none applications, respectively.
 .Sh DEBUGGING
 .Nm
 logs using the
