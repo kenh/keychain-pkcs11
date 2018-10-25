@@ -139,7 +139,7 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec,
 
 	[lac evaluateAccessControl: secaccess
 			operation: acc_control
-			localizedReason: @"Requesting key access"
+			localizedReason: @"authenticate to your smartcard"
 			reply: ^(BOOL success, NSError *err) {
 				b = success;
 				if (! success) {
