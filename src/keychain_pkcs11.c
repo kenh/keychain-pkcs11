@@ -2539,7 +2539,7 @@ add_identity(CFDictionaryRef dict)
 static void
 scan_certificates(void)
 {
-	const char **certs = default_cert_search, **p;
+	char **certs = NULL, **p;
 	CFMutableArrayRef cmatch = NULL;
 	CFMutableSetRef certset = NULL;
 	CFDictionaryRef query = NULL;
@@ -2616,6 +2616,8 @@ scan_certificates(void)
 	/*
 	 * Short circuit the search if "none" is the first entry
 	 */
+
+	certs = prefkey_arrayget("certificateList", default_cert_search);
 
 	if (certs[0] && strcasecmp(certs[0], "none") == 0) {
 		os_log_debug(logsys, "Special entry \"none\" found, not "
@@ -2725,6 +2727,8 @@ scan_certificates(void)
 	os_log_debug(logsys, "%u certificates added", cert_list_count);
 
 out:
+	if (certs)
+		array_free(certs);
 	if (cmatch)
 		CFRelease(cmatch);
 	if (certset)
