@@ -37,23 +37,10 @@ keychain_pkcs11_la_LDFLAGS = \
 			-module \
 			-avoid-version \
 			-export-symbols-regex '^C_' \
+			-shrext ".dylib" \
 			-framework Security \
 			-framework LocalAuthentication \
 			#
-##
-## For reasons I do not understand, on MacOS X libtool creates a ".so"
-## file if you specify -module, instead of a .dylib.  Create a symbolic
-## link in the installation directory so programs that want a .dylib will
-## work
-
-.PHONY: install-exec-hook uninstall-hook
-install-exec-hook:
-	cd $(DESTDIR)$(libdir) && \
-		rm -f keychain-pkcs11.dylib && \
-		$(LN_S) keychain-pkcs11.so keychain-pkcs11.dylib
-
-uninstall-hook:
-	rm -f $(DESTDIR)$(libdir)/keychain-pkcs11.dylib
 
 ##
 ## Sources for our test program; only built by "make check"

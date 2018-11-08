@@ -207,7 +207,7 @@ struct attr_list {
     struct attr_list	*next;
 };
 
-#define LIBRARY_NAME ".libs/keychain-pkcs11.so"
+#define LIBRARY_NAME ".libs/keychain-pkcs11.dylib"
 
 /*
  * Linked list of data to perform operation on
