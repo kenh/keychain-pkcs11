@@ -542,7 +542,8 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
 	id_list_free();
-	lacontext_free(lacontext);
+	if (lacontext)
+		lacontext_free(lacontext);
 	lacontext = NULL;
 	logged_in = false;
 
@@ -1096,13 +1097,25 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	LOCK_MUTEX(se->mutex);
 
 	/*
-	 * I went back and forth here; I finally decided that if a PIN
-	 * was passed into this function then we should set it.  We
-	 * use the sme PIN for all private keys; that seems a safe assumption
-	 * for now
+         * I went back and forth here; I finally decided that if a PIN
+         * was passed into this function then we should set it.  We
+         * use the same PIN for all private keys; that seems a safe
+         * assumption for now
 	 */
 
 	if (pin) {
+		/*
+		 * If we don't have a localauth context, then
+		 * we can't do anything; in that case, just
+		 * return success.
+		 */
+
+		if (! lacontext) {
+			os_log_debug(logsys, "localauth context is NULL, "
+				     "cannot set PIN, skipping");
+			goto out;
+		}
+
 		for (i = 0; i < id_list_count; i++) {
 			enum la_keyusage usage;
 
@@ -2262,6 +2275,7 @@ add_identity(CFDictionaryRef dict)
 	CFTypeRef refresult;
 	CFDictionaryRef refquery, keydict;
 	CFDataRef p_ref;
+	CFIndex numitems;
 	OSStatus ret;
 	int i = id_list_count;
 
@@ -2311,18 +2325,18 @@ add_identity(CFDictionaryRef dict)
 		kSecClass,
 		kSecMatchLimit,
 		kSecReturnRef,
-		kSecUseAuthenticationContext,
-#define AUTHC_INDEX	3
 		kSecValuePersistentRef,
-#define P_REF_INDEX	4
+#define P_REF_INDEX	3
+		kSecUseAuthenticationContext,
+#define AUTHC_INDEX	4
 	};
 
 	const void *values[] = {
 		kSecClassIdentity,		/* kSecClass */
 		kSecMatchLimitOne,		/* kSecMatchLimit */
 		kCFBooleanTrue,			/* kSecReturnRef */
-		NULL,				/* UseAuthtenticationContext */
 		NULL,				/* PersistentReference */
+		NULL,				/* UseAuthtenticationContext */
 	};
 
 	/*
@@ -2364,11 +2378,23 @@ add_identity(CFDictionaryRef dict)
 	 * This will attach the LAContext to the identity.
 	 */
 
-	values[AUTHC_INDEX] = lacontext;
 	values[P_REF_INDEX] = p_ref;
+	values[AUTHC_INDEX] = lacontext;
 
-	refquery = CFDictionaryCreate(NULL, keys, values,
-				      sizeof(keys)/sizeof(keys[0]),
+	/*
+	 * It turns out that in some cases (if you are running under
+	 * 32 bit mode, for example), you won't be able to allocate a
+	 * lacontext.  So if that happens we need to be sure not to
+	 * put the lacontext into our dictionary.  We can't use kCFNull
+	 * because that will cause the SecItemCopyMatching call later
+	 * to fail; just make sure the lacontext is at the end and if
+	 * if lacontext is NULL just subtract one from the dictionary
+	 * item count.
+	 */
+
+	numitems = sizeof(keys)/sizeof(keys[0]) - (lacontext ? 0 : 1);
+
+	refquery = CFDictionaryCreate(NULL, keys, values, numitems,
 				      &kCFTypeDictionaryKeyCallBacks,
 				      &kCFTypeDictionaryValueCallBacks);
 
@@ -4235,7 +4261,8 @@ token_logout(void)
 	 * across identities, we only need to do this once.
 	 */
 
-	lacontext_logout(lacontext);
+	if (lacontext)
+		lacontext_logout(lacontext);
 
 	logged_in = false;
 }
