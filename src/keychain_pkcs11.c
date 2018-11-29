@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include "mypkcs11.h"
 #include "keychain_pkcs11.h"
@@ -287,7 +288,8 @@ struct certinfo {
 static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
-static bool cert_list_initialized = false;
+_Atomic static bool cert_list_initialized = ATOMIC_VAR_INIT(false);
+_Atomic static bool cert_list_initializing = ATOMIC_VAR_INIT(false);
 static bool cert_slot_enabled = false;
 
 static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
@@ -324,6 +326,7 @@ struct certcontext {
 	const void		*match;
 };
 
+static void background_cert_scan(void *);
 static void scan_certificates(void);
 static void add_certificate(CFDictionaryRef, CFMutableSetRef);
 static void cert_list_free(void);
@@ -517,6 +520,30 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
 			     "Certificate slot ENABLED", progname);
 		cert_slot_enabled = true;
+
+		/*
+		 * Mark that we have a certificate scan running; if one
+		 * is running then don't start another.
+		 *
+		 * In a perfect world this shouldn't happen, but if an
+		 * application called C_Finalize() then C_Initialize then
+		 * this could mess things up.
+		 *
+		 * Since by default we are only doing a certificate scan
+		 * for a few applications (like firefox) I decided to
+		 * make things as simple as possible; this means that an
+		 * application that calls C_Finalize() before a certificate
+		 * scan is complete will leak memory.  I thought about all
+		 * of the complicated gyrations that needed to be done
+		 * to fix this, and since this is really only useful for
+		 * Firefox (which is typically long-running) I decided to
+		 * not deal with it.  Maybe I will address it later.
+		 */
+
+		if (!atomic_exchange(&cert_list_initializing, true))
+			dispatch_async_f(dispatch_get_global_queue(
+					  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+					 NULL, background_cert_scan);
 	}
 
 	initialized = 1;
@@ -553,8 +580,10 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	DESTROY_MUTEX(id_mutex);
 	DESTROY_MUTEX(sess_mutex);
 
-	obj_free(&cert_obj_list, &cert_obj_count, &cert_obj_size);
-	cert_list_free();
+	if (atomic_load(&cert_list_initialized)) {
+		obj_free(&cert_obj_list, &cert_obj_count, &cert_obj_size);
+		cert_list_free();
+	}
 
 	use_mutex = 0;
 	initialized = 0;
@@ -708,7 +737,9 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 		sprintfpad(slot_info->slotDescription,
 			   sizeof(slot_info->slotDescription), "%s",
 			   "Keychain Certificates");
-		slot_info->flags = CKF_TOKEN_PRESENT;
+		slot_info->flags = CKF_REMOVABLE_DEVICE;
+		if (atomic_load(&cert_list_initialized))
+			slot_info->flags |= CKF_TOKEN_PRESENT;
 		break;
 	}
 
@@ -950,12 +981,13 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		sess->obj_list_count = id_obj_count;
 		break;
 	case CERTIFICATE_SLOT:
-		if (!cert_list_initialized) {
-			scan_certificates();
-			build_cert_objects();
+		if (atomic_load(&cert_list_initialized)) {
+			sess->obj_list = cert_obj_list;
+			sess->obj_list_count = cert_obj_count;
+		} else {
+			sess->obj_list = NULL;
+			sess->obj_list_count = 0;;
 		}
-		sess->obj_list = cert_obj_list;
-		sess->obj_list_count = cert_obj_count;
 		break;
 	}
 
@@ -2550,6 +2582,24 @@ add_identity(CFDictionaryRef dict)
 		return -1;
 
 	return 0;
+}
+
+/*
+ * This function is called by the dispatch system and will call
+ * scan_certificates() and build_cert_objects() and the appropriate
+ * memory barrier functions
+ */
+
+static void
+background_cert_scan(void *dummy)
+{
+	if (! atomic_load(&cert_list_initialized)) {
+		scan_certificates();
+		build_cert_objects();
+		atomic_store(&cert_list_initialized, true);
+	}
+
+	atomic_store(&cert_list_initializing, false);
 }
 
 /*
