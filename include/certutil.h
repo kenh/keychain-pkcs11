@@ -31,3 +31,9 @@ extern bool get_pubkey_info(CFDataRef, CFDataRef *, CFDataRef *);
  */
 
 extern CFDataRef get_hash(CFTypeRef, CFIndex length, CFDataRef);
+
+/*
+ * Return 'true' if the given certificate is a CA
+ */
+
+extern bool is_cert_ca(SecCertificateRef);

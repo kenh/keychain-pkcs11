@@ -4,6 +4,8 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <Security/SecCertificate.h>
+#include <Security/SecCertificateOIDs.h>
 #include <Security/SecAsn1Coder.h>
 #include <Security/SecAsn1Templates.h>
 #include <Security/SecDigestTransform.h>
@@ -389,4 +391,77 @@ out:
 		CFRelease(tr);
 
 	return result;
+}
+
+/*
+ * Return 'true' if the given certificate is a CA.
+ *
+ * The following things have to be true for a cert to be a CA:
+ *
+ * - It has to have a Basic Constraints section (OID - 2.5.29.19)
+ * - It has to have the cA boolean field set to TRUE
+ *
+ * Because right now we are only dealing with SecCertificateRefs, we
+ * can get away with not having to parse the ASN.1 ourselves.  Just call
+ * SecCertificateCopyValues() with the correct OIDs.
+ */
+
+bool
+is_cert_ca(SecCertificateRef cert)
+{
+	CFDictionaryRef mdict = NULL, valdict;
+	CFArrayRef query = NULL, valarray;
+	CFErrorRef err = NULL;
+	bool is_ca = false;
+
+	/*
+	 * Create a (single) array with our Basic Constraints OID.
+	 */
+
+	const void *keys[] = {
+		kSecOIDBasicConstraints,
+	};
+
+	query = CFArrayCreate(kCFAllocatorDefault, keys,
+			      sizeof(keys)/sizeof(keys[0]),
+			      &kCFTypeArrayCallBacks);
+
+	if (! query) {
+		os_log_debug(logsys, "Unable to create cert query array");
+		goto out;
+	}
+
+	mdict = SecCertificateCopyValues(cert, query, &err);
+
+	/*
+	 * The dictionary should always be returned, even if it is empty;
+	 * report an error if it is not.
+	 */
+
+	if (! mdict) {
+		os_log_debug(logsys, "SecCertificateCopyValues failed: "
+			     "%{public}@", err);
+		goto out;
+	}
+
+	/*
+	 * Make sure that our key exists in the dictionary; if it does
+	 * not we can exit early (NULL is not valid for this entry).
+	 */
+
+	valdict = CFDictionaryGetValue(mdict, kSecOIDBasicConstraints);
+
+	if (! valdict)
+		goto out;
+
+	is_ca = true;
+out:
+	if (query)
+		CFRelease(query);
+	if (mdict)
+		CFRelease(mdict);
+	if (err)
+		CFRelease(err);
+
+	return is_ca;
 }
