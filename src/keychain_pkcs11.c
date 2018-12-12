@@ -35,7 +35,7 @@
  * or CERTIFICATE_SLOT
  */
 
-#define CHECKSLOT(slot) \
+#define CHECKSLOT(slot, present) \
 do { \
 	if (slot != TOKEN_SLOT && slot != CERTIFICATE_SLOT) { \
 		os_log_debug(logsys, "Slot %lu is invalid, returning " \
@@ -46,6 +46,27 @@ do { \
 		os_log_debug(logsys, "Requested cert slot (%lu) but is " \
 			     "disabled, returning CKR_SLOT_ID_INVALID", slot); \
 		return CKR_SLOT_ID_INVALID; \
+	} \
+	if (present) { \
+		switch (slot) { \
+		case TOKEN_SLOT: \
+			if (id_list_count == 0) { \
+				os_log_debug(logsys, "Requested token slot " \
+					     "but no token present, " \
+					     "returning " \
+					     "CKR_TOKEN_NOT_PRESENT"); \
+				return CKR_TOKEN_NOT_PRESENT; \
+			} \
+			break; \
+		case CERTIFICATE_SLOT: \
+			if (! atomic_load(&cert_list_initialized)) { \
+				os_log_debug(logsys, "Requested certificate " \
+					     "slot, but certificate list " \
+					     "not initialized yet, returning" \
+					     " CKR_TOKEN_NOT_PRESENT"); \
+				return CKR_TOKEN_NOT_PRESENT; \
+			} \
+		} \
 	} \
 } while (0)
 
@@ -703,7 +724,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	os_log_debug(logsys, "slot_id = %d, slot_info = %p", (int) slot_id,
 		     slot_info);
 
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, false);
 
 	if (! slot_info)
 		RET(C_GetSlotInfo, CKR_ARGUMENTS_BAD);
@@ -763,13 +784,10 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
 		     token_info);
 
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, true);
 
 	if (! token_info)
 		RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
-
-	if (slot_id == TOKEN_SLOT && id_list_count == 0)
-		RET(C_GetTokenInfo, CKR_TOKEN_NOT_PRESENT);
 
 	/*
 	 * We can't do any administrative operations, really, from the
@@ -878,7 +896,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 	os_log_debug(logsys, "slot_id = %lu, mechlist = %p, mechnum = %lu",
 		     slot_id, mechlist, *mechnum);
 
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, true);
 
 	/*
 	 * It's hard to know exactly what all mechanisms are supported by
@@ -927,7 +945,7 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
 	os_log_debug(logsys, "slot_id = %lu, mechtype = %s, mechinfo = %p",
 		     slot_id, getCKMName(mechtype), mechinfo);
 
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, true);
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mechtype == keychain_mechmap[i].cki_mech) {
@@ -962,7 +980,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		     "notify_callback = %p, session_handle = %p", (int) slot_id,
 		     flags, app_callback, notify_callback, session);
 
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, true);
 
 	if (! (flags & CKF_SERIAL_SESSION))
 		RET(C_OpenSession, CKR_SESSION_PARALLEL_NOT_SUPPORTED);
@@ -1068,7 +1086,7 @@ cont:
 
 CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 {
-	CHECKSLOT(slot_id);
+	CHECKSLOT(slot_id, true);
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
