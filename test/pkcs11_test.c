@@ -1,3 +1,4 @@
+
 /*
  *  pkcs11_test.c
  *
@@ -30,6 +31,7 @@
 #include <string.h>
 #include <signal.h>
 #include <ctype.h>
+#include <time.h>
 
 /*
  * Dump one or more attributes of an object
@@ -266,6 +268,7 @@ usage(const char *progname)
     fprintf(stderr, "\t-V filename\tSignature data for verification; use "
     	    "with -v and -o\n");
     fprintf(stderr, "\t-w\t\tInstead of exiting, wait for Control-C\n");
+    fprintf(stderr, "\t-W\t\tWait until selected slot has card inserted\n");
     exit(1);
 }
 
@@ -288,7 +291,9 @@ int main(int argc, char *argv[]) {
     CK_ULONG count;
 
     CK_OBJECT_CLASS cls = -1;
+#if 0
     CK_CERTIFICATE_TYPE certtype;
+#endif
     CK_ATTRIBUTE attrs[10];
     CK_ULONG ulValue;
 
@@ -312,12 +317,13 @@ int main(int argc, char *argv[]) {
     bool forcelogin = false;
     bool forcenologin = false;
     bool requiretoken = true;
+    bool waitslot = false;
 
     struct attr_list *attr_head = NULL, *attr_tail = NULL, *attr;
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:Tv:V:w")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:Tv:V:wW")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -469,6 +475,9 @@ int main(int argc, char *argv[]) {
 	case 'w':
 	    sleepatexit = true;
 	    break;
+	case 'W':
+	    waitslot = true;
+	    break;
 	case '?':
 	default:
 	    usage(argv[0]);
@@ -574,6 +583,53 @@ int main(int argc, char *argv[]) {
 	printf("\n");
     } else {
         fprintf(stderr, "Error getting slot info (rv = %s)\n", getCKRName(rv));
+    }
+
+    if (! (sInfo.flags & CKF_TOKEN_PRESENT)) {
+	if (waitslot && p11p->C_GetSlotInfo) {
+	    struct timespec ts, start, end;
+	    time_t seconds, milli;
+
+	    ts.tv_sec = 0;
+	    ts.tv_nsec = 1E8;
+
+	    printf("No token present, waiting ...");
+	    fflush(stdout);
+
+	    clock_gettime(CLOCK_REALTIME, &start);
+
+	    while (1) {
+		memset(&sInfo, 0, sizeof(sInfo));
+		p11p->C_GetSlotList(FALSE, NULL, &numSlots);
+		rv = p11p->C_GetSlotInfo(slot, &sInfo);
+
+		if (rv != CKR_OK) {
+		    fprintf(stderr, "Error getting slot info (rv = %s)\n",
+			    getCKRName(rv));
+		    exit(1);
+		}
+
+		if (sInfo.flags & CKF_TOKEN_PRESENT)
+		    break;
+
+		nanosleep(&ts, NULL);
+	    }
+
+	    clock_gettime(CLOCK_REALTIME, &end);
+
+	    seconds = end.tv_sec - start.tv_sec;
+	    if (end.tv_nsec > start.tv_nsec) {
+		milli = (end.tv_nsec - start.tv_nsec) / 1E6;
+	    } else {
+		seconds--;
+		milli = (1E9 + end.tv_nsec - start.tv_nsec) / 1E6;
+	    }
+
+	    printf("token available after %ld.%03ld seconds\n", seconds, milli);
+	} else {
+	    fprintf(stderr, "No token available\n");
+	    exit(1);
+	}
     }
 
     memset(&tInfo, 0, sizeof(tInfo));
