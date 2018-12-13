@@ -22,4 +22,14 @@ do { \
 	CFRelease(errstr); \
 } while (0)
 
+/*
+ * Log a message about a particular Core Foundation type; use this to log
+ * if you get a type you aren't expecting.  Message will be logged in the
+ * form:
+ *
+ * your log message: type
+ */
+
+extern void logtype(const char *, CFTypeRef);
+
 #endif /* __KEYCHAIN_PKCS11_H__ */

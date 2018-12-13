@@ -412,7 +412,9 @@ is_cert_ca(SecCertificateRef cert)
 	CFDictionaryRef mdict = NULL, valdict;
 	CFArrayRef query = NULL, valarray;
 	CFErrorRef err = NULL;
+	CFTypeRef result;
 	bool is_ca = false;
+	CFIndex i;
 
 	/*
 	 * Create a (single) array with our Basic Constraints OID.
@@ -454,7 +456,95 @@ is_cert_ca(SecCertificateRef cert)
 	if (! valdict)
 		goto out;
 
-	is_ca = true;
+	/*
+	 * The TYPE should be a "section" (which should mean an array).
+	 * Make sure that is correct.
+	 */
+
+	result = CFDictionaryGetValue(valdict, kSecPropertyKeyType);
+
+	if (! result) {
+		os_log_debug(logsys, "Unable to find kSecPropertyKeyType "
+			     "in certificate dictionary");
+		goto out;
+	}
+
+	if (! CFEqual(result, kSecPropertyTypeSection)) {
+		os_log_debug(logsys, "Expected a value of TypeSection, but "
+			     "instead got: %{public}@", result);
+		goto out;
+	}
+
+	valarray = CFDictionaryGetValue(valdict, kSecPropertyKeyValue);
+
+	if (! valarray) {
+		os_log_debug(logsys, "Unable to retrieve value for "
+			     "Basic Constraints extenstion");
+		goto out;
+	}
+
+	if (CFGetTypeID(valarray) != CFArrayGetTypeID()) {
+		logtype("Was expecting a CFArray for Basic Constraints, "
+			"but got", valarray);
+		goto out;
+	}
+
+	/*
+	 * Iterate through the list of array elements until we hit one
+	 * that has the label, "Certificate Authority".
+	 */
+
+	for (i = 0; i < CFArrayGetCount(valarray); i++) {
+		valdict = CFArrayGetValueAtIndex(valarray, i);
+
+		if (CFGetTypeID(valdict) != CFDictionaryGetTypeID()) {
+			logtype("Was expecting CFDict for Basic Constraints "
+				"element, but got", valdict);
+			continue;
+		}
+
+		result = CFDictionaryGetValue(valdict, kSecPropertyKeyLabel);
+
+		if (! result) {
+			os_log_debug(logsys, "Cannot find label for Basic "
+				     "Constraints array element");
+			continue;
+		}
+
+		if (CFStringCompare(result, CFSTR("Certificate Authority"),
+				    kCFCompareCaseInsensitive) ==
+							kCFCompareEqualTo) {
+			/*
+			 * This is the cA Boolean field.  I guess the way
+			 * this works is that if it is true, it is set to
+			 * the string "Yes" ... so I guess we'll go with that?
+			 * At least do a case insensitive match.
+			 */
+
+			result = CFDictionaryGetValue(valdict,
+						      kSecPropertyKeyValue);
+
+			if (! result) {
+				os_log_debug(logsys, "Unable to find value "
+					     "for cA boolean");
+				goto out;
+			}
+
+			if (CFGetTypeID(result) != CFStringGetTypeID()) {
+				logtype("Expected a CFString, but got", result);
+				goto out;
+			}
+
+			if (CFStringCompare(result, CFSTR("Yes"),
+					    kCFCompareCaseInsensitive) ==
+							kCFCompareEqualTo) {
+				is_ca = true;
+			}
+
+			break;
+		}
+	}
+
 out:
 	if (query)
 		CFRelease(query);

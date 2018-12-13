@@ -363,7 +363,6 @@ static void build_cert_objects(void);
  */
 
 static void sprintfpad(unsigned char *, size_t, const char *, ...);
-static void logtype(const char *, CFTypeRef);
 static bool boolfromdict(const char *, CFDictionaryRef, CFTypeRef);
 static char *getkeylabel(SecKeyRef);
 static char *getstrcopy(CFStringRef);
@@ -3547,7 +3546,7 @@ getstrcopy(CFStringRef string)
  * Log this object's type
  */
 
-static void
+void
 logtype(const char *string, CFTypeRef ref)
 {
 	CFTypeID id = CFGetTypeID(ref);
@@ -3880,8 +3879,7 @@ build_cert_objects(void)
 	int i;
 	CK_OBJECT_CLASS cl;
 	CK_CERTIFICATE_TYPE ct = CKC_X_509;	/* Only this for now */
-	CK_TRUST regtrust = CKT_NSS_TRUSTED;
-	CK_TRUST deltrust = CKT_NSS_TRUSTED_DELEGATOR;
+	CK_TRUST trust = CKT_NSS_TRUSTED_DELEGATOR;
 	CK_ULONG t;
 	CK_BBOOL b;
 	CFDataRef d;
@@ -3964,18 +3962,21 @@ build_cert_objects(void)
 				      CFDataGetBytePtr(hash),
 				      CFDataGetLength(hash));
 
+		/*
+		 * As far as I can tell, CAs should have these various
+		 * trust objects set, but other certificates (servers,
+		 * users) should NOT.
+		 */
+
 		if (is_cert_ca(cert)) {
-			ADD_ATTR(cert, CKA_TRUST_SERVER_AUTH, deltrust);
-			ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, deltrust);
-			ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, deltrust);
-			ADD_ATTR(cert, CKA_TRUST_CODE_SIGNING, deltrust);
-		} else {
-			ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, regtrust);
-			ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, regtrust);
-		}
+			ADD_ATTR(cert, CKA_TRUST_SERVER_AUTH, trust);
+			ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, trust);
+			ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, trust);
+			ADD_ATTR(cert, CKA_TRUST_CODE_SIGNING, trust);
 #if 0
-		ADD_ATTR(cert, CKA_TRUST_STEP_UP_APPROVED, trust);
+			ADD_ATTR(cert, CKA_TRUST_STEP_UP_APPROVED, trust);
 #endif
+		}
 
 		NEW_OBJECT(cert);
 
