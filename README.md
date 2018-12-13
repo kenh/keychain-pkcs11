@@ -27,8 +27,14 @@ with Apple-provided APIs.
 ## Getting Started
 
 Currently Keychain-PKCS11 is considered "beta quality", but is available either
-via a package file, or you can compile it yourself.  See
-**Prerequisites** and **Installing** below.
+via a package file, or you can compile it yourself.  For MacOS X Installer
+packages see the [releases](https://github.com/kenh/keychain-pkcs11/releases)
+page on Github.  Currently the Installer packages are unsigned so you will
+have to open them from the Terminal or use System Preferences to
+``Open Anyway''.
+
+If you wish the compile the package from source, see **Prerequisites**
+and **Installing** below.
 
 ### Prerequisites
 
