@@ -4,7 +4,7 @@ This is a library designed to bridge the gap between the Apple Security
 Framework and applications which support using a PKCS#11 interface to
 access cryptographic hardware.
 
-On High Sierra Apple includes a reasonable Smartcard implementation
+On Sierra and above Apple includes a reasonable Smartcard implementation
 but it only provides access to the Smartcard functions via the modern
 Security Framework APIs (you can no longer access smartcards via the
 older deprecated CDSA APIs).  If you have applications which haven't
@@ -16,18 +16,18 @@ either stuck with two options:
 
 Keychain-PKCS11 is designed to bridge this gap.  It provides a PKCS#11
 library interface for applications which can use it, but it interfaces
-directly with the Smartcard support in High Sierra; this allows the
+directly with the Smartcard support in Sierra; this allows the
 simultaneous use of PKCS#11 applications and native Security framework
 applications.
 
 Keychain-PKCS11 is implemented with modern APIs that are all supported
-currently on High Sierra; with an eye towards long-term compatibiity
+currently on Sierra, with an eye towards long-term compatibiity
 with Apple-provided APIs.
 
 ## Getting Started
 
-Currently Keychain-PKCS11 is considered "beta quality" and is only
-provided as source code, so you will need to compile it yourself.  See
+Currently Keychain-PKCS11 is considered "beta quality", but is available either
+via a package file, or you can compile it yourself.  See
 **Prerequisites** and **Installing** below.
 
 ### Prerequisites
