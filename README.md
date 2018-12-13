@@ -69,7 +69,7 @@ can take all of the standard options supported by Autoconf.
 % make install
 ```
 
-This will install `keychain-pkcs11.so`, by default in `/usr/local/lib`
+This will install `keychain-pkcs11.dylib`, by default in `/usr/local/lib`
 (the last step may need to be performed by root, depending on the permissions
 in your target installation directory). You
 can change the install location by using the `--prefix` option to `configure`.
@@ -77,7 +77,7 @@ See `configure --help` for more information.
 
 ### System Configuration
 
-Once you have installed `keychain-pkcs11.so`, simply configure your various
+Once you have installed `keychain-pkcs11.dylib`, simply configure your various
 applications to use this as a PKCS#11 module.  How you do that is application
 dependent.
 
@@ -124,6 +124,9 @@ using `log`, run:
 ```
 
 This will produce a lot of output, so you may want to redirect this to a file.
+
+A man page is installed that details various different defaults you can
+change using **defaults(1)**; see **keychain-pkcs11(8)**.
 
 ## Caveats
 
