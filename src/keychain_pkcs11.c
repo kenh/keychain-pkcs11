@@ -3842,11 +3842,13 @@ build_id_objects(int lock)
 				      CFDataGetLength(exponent));
 		}
 
+		b = CK_TRUE;
+		ADD_ATTR(id, CKA_SENSITIVE, b);
 		b = CK_FALSE;
 		ADD_ATTR(id, CKA_ALWAYS_AUTHENTICATE, b);
-		b = CK_FALSE;
 		ADD_ATTR(id, CKA_UNWRAP, b);
 		ADD_ATTR(id, CKA_DERIVE, b);
+		ADD_ATTR(id, CKA_EXTRACTABLE, b);
 
 		NEW_OBJECT(id);
 
