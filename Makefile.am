@@ -5,9 +5,6 @@
 ## use autoreconf)
 ##
 
-## Search for Autoconf macros here
-ACLOCAL_AMFLAGS = -I m4
-
 AM_CFLAGS = -Wall
 AM_CPPFLAGS = -I$(top_srcdir)/include
 
