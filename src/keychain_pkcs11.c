@@ -59,7 +59,7 @@ do { \
 			} \
 			break; \
 		case CERTIFICATE_SLOT: \
-			if (! atomic_load(&cert_list_initialized)) { \
+			if (atomic_load(&cert_list_status) != initialized) { \
 				os_log_debug(logsys, "Requested certificate " \
 					     "slot, but certificate list " \
 					     "not initialized yet, returning" \
@@ -309,8 +309,8 @@ struct certinfo {
 static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
-_Atomic static bool cert_list_initialized = ATOMIC_VAR_INIT(false);
-_Atomic static bool cert_list_initializing = ATOMIC_VAR_INIT(false);
+enum certstate { uninitialized, initializing, initialized };
+_Atomic static enum certstate cert_list_status = ATOMIC_VAR_INIT(uninitialized);
 static bool cert_slot_enabled = false;
 
 static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
@@ -412,7 +412,7 @@ do { \
 #define FUNCINITCHK(func) \
 	FUNCINIT(func); \
 do { \
-	if (! initialized) { \
+	if (! module_initialized) { \
 		os_log_debug(logsys, #func " returning NOT_INITIALIZED"); \
 		return CKR_CRYPTOKI_NOT_INITIALIZED; \
 	} \
@@ -431,7 +431,7 @@ do { \
 	return val; \
 } while (0)
 
-static int initialized = 0;
+static int module_initialized = 0;
 
 /*
  * Our implementation of C_GetFunctionList(), which just returns a pointer
@@ -466,7 +466,7 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 
 	FUNCINIT(C_Initialize);
 
-	if (initialized) {
+	if (module_initialized) {
 		RET(C_Initialized, CKR_CRYPTOKI_ALREADY_INITIALIZED);
 	}
 
@@ -537,6 +537,7 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 			     "Certificate slot DISABLED", progname);
 		cert_slot_enabled = false;
 	} else {
+		enum certstate status = uninitialized;
 		os_log_debug(logsys, "Program \"%{public}s\" has the Keychain "
 			     "Certificate slot ENABLED", progname);
 		cert_slot_enabled = true;
@@ -560,13 +561,14 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		 * not deal with it.  Maybe I will address it later.
 		 */
 
-		if (!atomic_exchange(&cert_list_initializing, true))
+		if (atomic_compare_exchange_strong(&cert_list_status,
+						   &status, initializing))
 			dispatch_async_f(dispatch_get_global_queue(
 					  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
 					 NULL, background_cert_scan);
 	}
 
-	initialized = 1;
+	module_initialized = 1;
 
 	RET(C_Initalize, CKR_OK);
 }
@@ -600,13 +602,13 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 	DESTROY_MUTEX(id_mutex);
 	DESTROY_MUTEX(sess_mutex);
 
-	if (atomic_load(&cert_list_initialized)) {
+	if (atomic_load(&cert_list_status) == initialized) {
 		obj_free(&cert_obj_list, &cert_obj_count, &cert_obj_size);
 		cert_list_free();
 	}
 
 	use_mutex = 0;
-	initialized = 0;
+	module_initialized = 0;
 	cert_slot_enabled = 0;
 
 	RET(C_Finalize, CKR_OK);
@@ -758,7 +760,7 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 			   sizeof(slot_info->slotDescription), "%s",
 			   "Keychain Certificates");
 		slot_info->flags = CKF_REMOVABLE_DEVICE;
-		if (atomic_load(&cert_list_initialized))
+		if (atomic_load(&cert_list_status) == initialized)
 			slot_info->flags |= CKF_TOKEN_PRESENT;
 		break;
 	}
@@ -998,7 +1000,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		sess->obj_list_count = id_obj_count;
 		break;
 	case CERTIFICATE_SLOT:
-		if (atomic_load(&cert_list_initialized)) {
+		if (atomic_load(&cert_list_status) == initialized) {
 			sess->obj_list = cert_obj_list;
 			sess->obj_list_count = cert_obj_count;
 		} else {
@@ -2610,13 +2612,10 @@ add_identity(CFDictionaryRef dict)
 static void
 background_cert_scan(void *dummy)
 {
-	if (! atomic_load(&cert_list_initialized)) {
-		scan_certificates();
-		build_cert_objects();
-		atomic_store(&cert_list_initialized, true);
-	}
+	scan_certificates();
+	build_cert_objects();
 
-	atomic_store(&cert_list_initializing, false);
+	atomic_store(&cert_list_status, initialized);
 }
 
 /*
@@ -2852,7 +2851,7 @@ cert_list_free(void)
 
 	cert_list = NULL;
 
-	cert_list_initialized = false;
+	atomic_store(&cert_list_status, uninitialized);
 }
 
 /*
