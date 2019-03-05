@@ -12,7 +12,9 @@ been updated OR you have applications which support PKCS#11, then you're
 either stuck with two options:
 
 * Not using those applications
-* Disabling the included Smartcard support and using a third-party interface which provides a PKCS#11 library, at the cost of losing functionality like support for integrated Smartcard login and possibly support by native applications.
+* Disabling the included Smartcard support and using a third-party
+interface which provides a PKCS#11 library, at the cost of losing functionality like support for integrated Smartcard login and possibly support by
+native applications.
 
 Keychain-PKCS11 is designed to bridge this gap.  It provides a PKCS#11
 library interface for applications which can use it, but it interfaces
@@ -26,12 +28,13 @@ with Apple-provided APIs.
 
 ## Getting Started
 
-Currently Keychain-PKCS11 is considered "beta quality", but is available either
-via a package file, or you can compile it yourself.  For MacOS X Installer
-packages see the [releases](https://github.com/kenh/keychain-pkcs11/releases)
+Currently Keychain-PKCS11 is considered &ldquo;beta quality&rdquo;, but is
+available either via a package file, or you can compile it yourself.
+For MacOS X Installer packages see the
+[releases](https://github.com/kenh/keychain-pkcs11/releases)
 page on Github.  Currently the Installer packages are unsigned so you will
 have to open them from the Terminal or use System Preferences to
-``Open Anyway''.
+&ldquo;Open Anyway&rdquo;.
 
 If you wish the compile the package from source, see **Prerequisites**
 and **Installing** below.
@@ -166,8 +169,15 @@ debug log (see above).
 
 ## Acknowledgments
 
-* This code was inspired by [KeychainToken](https://github.com/slushpupie/KeychainToken).  None of that code could actually be used as it was based on the old APIs (and made calls to OpenSSL), but I used it for inspiration (I also took the `pkcs11_test` program from that distribution).
-* I used the Smartcard support in [Chrome](https://chromium.googlesource.com/chromium/src/) to get me pointed in the right direction in terms of which Security Framework APIs to use.
+* This code was inspired by
+[KeychainToken](https://github.com/slushpupie/KeychainToken).  None of that
+code could actually be used as it was based on the old APIs (and made calls
+to OpenSSL), but I used it for inspiration (I also took the `pkcs11_test`
+program from that distribution).
+* I used the Smartcard support in
+[Chrome](https://chromium.googlesource.com/chromium/src/) to get me
+pointed in the right direction in terms of which Security Framework
+APIs to use.
 
 ### About the name
 
