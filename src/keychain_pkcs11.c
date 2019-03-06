@@ -186,6 +186,7 @@ static CFDictionaryRef cfgetindex(CFTypeRef, unsigned int);/* Entry in list */
 static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
+static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 
 /*
  * Our object list and the functions to handle them
@@ -3696,6 +3697,8 @@ build_id_objects(int lock)
 		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
 		CFDataRef keydata = NULL, modulus = NULL, exponent = NULL;
 		CFErrorRef error;
+		unsigned char *objid = NULL;
+		unsigned int objidlen;
 
 		OBJINIT(id);
 
@@ -3704,11 +3707,12 @@ build_id_objects(int lock)
 		 * private key.  Add in attributes we need.
 		 */
 
+		get_index_bytes(i, &objid, &objidlen);
+
 		cl = CKO_CERTIFICATE;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
-		t = i;
-		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
 		ADD_ATTR(id, CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
 		ADD_ATTR(id, CKA_TOKEN, b);
@@ -3738,8 +3742,7 @@ build_id_objects(int lock)
 		cl = CKO_PUBLIC_KEY;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
-		t = i;
-		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
 		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
 		ADD_ATTR(id, CKA_TOKEN, b);
@@ -3807,8 +3810,7 @@ build_id_objects(int lock)
 		cl = CKO_PRIVATE_KEY;
 		id_obj_list[id_obj_count].class = cl;
 		ADD_ATTR(id, CKA_CLASS, cl);
-		t = i;
-		ADD_ATTR(id, CKA_ID, t);
+		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
 		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
 		ADD_ATTR(id, CKA_TOKEN, b);
@@ -3851,6 +3853,9 @@ build_id_objects(int lock)
 
 		NEW_OBJECT(id);
 
+		if (objid)
+			free(objid);
+
 		if (subject)
 			CFRelease(subject);
 		if (issuer)
@@ -3881,7 +3886,6 @@ build_cert_objects(void)
 	CK_OBJECT_CLASS cl;
 	CK_CERTIFICATE_TYPE ct = CKC_X_509;	/* Only this for now */
 	CK_TRUST trust = CKT_NSS_TRUSTED_DELEGATOR;
-	CK_ULONG t;
 	CK_BBOOL b;
 	CFDataRef d;
 
@@ -3897,6 +3901,8 @@ build_cert_objects(void)
 		CFDataRef hash = NULL;
 		CFStringRef subjstr;
 		char *subjc;
+		unsigned char *objid = NULL;
+		unsigned int objidlen;
 
 		OBJINIT(cert);
 
@@ -3904,11 +3910,13 @@ build_cert_objects(void)
 		 * Add in an object for each certificate.
 		 */
 
-		t = i + 0xff00;		/* offset so no collision */
+		/* offset so no collision */
+		get_index_bytes(i + 0xff00, &objid, &objidlen);
+
 		cl = CKO_CERTIFICATE;
 		cert_obj_list[cert_obj_count].class = cl;
 		ADD_ATTR(cert, CKA_CLASS, cl);
-		ADD_ATTR(cert, CKA_ID, t);
+		ADD_ATTR_SIZE(cert, CKA_ID, objid, objidlen);
 		ADD_ATTR(cert, CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
 		ADD_ATTR(cert, CKA_TOKEN, b);
@@ -3980,6 +3988,9 @@ build_cert_objects(void)
 		}
 
 		NEW_OBJECT(cert);
+
+		if (objid)
+			free(objid);
 
 		if (subject)
 			CFRelease(subject);
@@ -4249,6 +4260,71 @@ prefkey_found(const char *key, const char *value, const char **default_list)
 	array_free(strlist);
 
 	return ret;
+}
+
+/*
+ * Get a sequence of bytes to be used for an the CKA_ID attribute
+ *
+ * Previously I just used the value of the identity/certificate array
+ * index as the raw identity bytes.  But that resulted in long identities
+ * (they ended up being 8 bytes) and I got a few complaints from users
+ * because in some applications you need to use the CKA_ID identity
+ * directly.
+ *
+ * So what we're doing here is returning the shortest possible byte string
+ * that identifies the index.  Encode the index in big-endian order since
+ * that makes it easier for humans to deal with.  Caller will need to
+ * free the returned string.
+ */
+
+static void
+get_index_bytes(unsigned int index, unsigned char **retbytes,
+		unsigned int *retlength)
+{
+	unsigned int length;
+	unsigned char *bytes;
+	int i;
+
+	/*
+	 * Figure out where we need to start grabbing bytes from the
+	 * index.  Note we always grab the last byte even if the value of
+	 * index is "0".
+	 */
+
+	for (i = sizeof(index); i > 1; i--) {
+		/*
+		 * Just so I remember ...
+		 *
+		 * if sizeof(index) == 4, then we want to shift right
+		 * _3_ bytes and test if that is nonzero.  If it is,
+		 * then we need to copy 4 bytes.  If it is zero, the
+		 * shift right 2 bytes and if it is nonzero then copy
+		 * 3 bytes, and so on ...
+		 */
+		if ((index >> ((i - 1) * 8)) != 0)
+			break;
+	}
+
+	length = i;
+
+	bytes = malloc(length);
+
+	for (i = 0; i < length; i++) {
+		/*
+		 * Again, for later ...
+		 *
+		 * Counting from the left (starting at 0), we want the
+		 * sizeof(index) - (length - i) byte.  If index is 4 bytes
+		 * and length is 3, we want byte 1.  Then we want byte 2,
+		 * then byte 3.  But to get byte N, we need to shift right
+		 * by sizeof(index) - N - 1 bytes.  That works out to be
+		 * length - i - 1.  Go figure.
+		 */
+		bytes[i] = (index >> ((length - i - 1) * 8)) & 0xff;
+	}
+
+	*retbytes = bytes;
+	*retlength = length;
 }
 
 /*
