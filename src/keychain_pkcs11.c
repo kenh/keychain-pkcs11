@@ -187,6 +187,7 @@ static void id_list_free(void);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
+static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
 
 /*
  * Our object list and the functions to handle them
@@ -2101,7 +2102,7 @@ NOTSUPPORTED(C_WaitForSlotEvent, (CK_SESSION_HANDLE session, CK_SLOT_ID_PTR slot
 static int
 scan_identities(void)
 {
-	CFDictionaryRef query;
+	CFMutableDictionaryRef query = NULL;
 	CFTypeRef result = NULL;
 	unsigned int i, count;
 	int ret = 0;
@@ -2152,36 +2153,19 @@ scan_identities(void)
 	 * Whew.
 	 */
 
-	const void *keys[] = {
-		kSecClass,
-		kSecMatchLimit,
-		kSecAttrAccessGroup,
-		kSecReturnPersistentRef,
-		kSecReturnAttributes,
-	};
-	const void *values[] = {
-		kSecClassIdentity,		/* kSecClass */
-		kSecMatchLimitAll,		/* kSecMatchLimit */
-		kSecAttrAccessGroupToken,	/* kSecAttrAccessGroup */
-		kCFBooleanTrue,			/* kSecReturnPersistentRef */
-		kCFBooleanTrue,			/* kSecReturnAttributes */
-	};
-
 	os_log_debug(logsys, "Performing identity scan");
 
 	/*
-	 * Create the query dictionary for SecCopyItemMatching(); see above
+	 * Create the query dictionary for SecCopyItemMatching(); see above.
+	 * If the first call to add_dict succeeds then all of the rest will.
 	 */
 
-	query = CFDictionaryCreate(NULL, keys, values,
-				   sizeof(keys)/sizeof(keys[0]),
-				   &kCFTypeDictionaryKeyCallBacks,
-				   &kCFTypeDictionaryValueCallBacks);
-
-	if (query == NULL) {
-		os_log_debug(logsys, "query dictionary creation returned NULL");
+	if (! add_dict(&query, kSecClass, kSecClassIdentity))
 		return -1;
-	}
+	add_dict(&query, kSecMatchLimit, kSecMatchLimitAll);
+	add_dict(&query, kSecAttrAccessGroup, kSecAttrAccessGroupToken);
+	add_dict(&query, kSecReturnPersistentRef, kCFBooleanTrue);
+	add_dict(&query, kSecReturnAttributes, kCFBooleanTrue);
 
 	/*
 	 * This is where the actual query happens
@@ -2325,11 +2309,43 @@ add_identity(CFDictionaryRef dict)
 	CFStringRef label;
 	CFNumberRef keytype;
 	CFTypeRef refresult;
-	CFDictionaryRef refquery, keydict;
+	CFMutableDictionaryRef refquery = NULL;
+	CFDictionaryRef keydict;
 	CFDataRef p_ref;
-	CFIndex numitems;
 	OSStatus ret;
 	int i = id_list_count;
+
+	/*
+	 * Just in case ...
+	 */
+
+	if (dict == NULL) {
+		os_log_debug(logsys, "Identity dictionary is NULL, returning!");
+		return -1;
+	}
+
+	/*
+	 * If we don't have enough id entries, allocate some more.
+	 */
+
+	if (++id_list_count > id_list_size) {
+		id_list_size += 5;
+		id_list = realloc(id_list, sizeof(*id_list) * id_list_size);
+	}
+
+	id_list[i].ident = NULL;
+	id_list[i].cert = NULL;
+	id_list[i].privkey = NULL;
+	id_list[i].pubkey = NULL;
+	id_list[i].label = NULL;
+	id_list[i].secaccess = NULL;
+	id_list[i].pkeyhash = NULL;
+
+	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
+					    (const void **)&p_ref)) {
+		os_log_debug(logsys, "Persistent id reference not found");
+		return -1;
+	}
 
 	/*
 	 * Our query dictionary for SecItemCopyMatching.  Here are the
@@ -2373,65 +2389,18 @@ add_identity(CFDictionaryRef dict)
 	 *	I can definitely say that at least for me, this did not work.
 	 */
 
-	const void *keys[] = {
-		kSecClass,
-		kSecMatchLimit,
-		kSecReturnRef,
-		kSecValuePersistentRef,
-#define P_REF_INDEX	3
-		kSecUseAuthenticationContext,
-#define AUTHC_INDEX	4
-	};
-
-	const void *values[] = {
-		kSecClassIdentity,		/* kSecClass */
-		kSecMatchLimitOne,		/* kSecMatchLimit */
-		kCFBooleanTrue,			/* kSecReturnRef */
-		NULL,				/* PersistentReference */
-		NULL,				/* UseAuthtenticationContext */
-	};
-
 	/*
-	 * Just in case ...
+	 * Build up our query dictionary (see above comments).  Feed in
+	 * the persistent reference to extract the REAL identity reference
+	 * (SecIdentityRef).  If we also pass in the LAContext this will
+	 * attach the LAContext to the identity.
 	 */
 
-	if (dict == NULL) {
-		os_log_debug(logsys, "Identity dictionary is NULL, returning!");
+	if (! add_dict(&refquery, kSecClass, kSecClassIdentity))
 		return -1;
-	}
-
-	/*
-	 * If we don't have enough id entries, allocate some more.
-	 */
-
-	if (++id_list_count > id_list_size) {
-		id_list_size += 5;
-		id_list = realloc(id_list, sizeof(*id_list) * id_list_size);
-	}
-
-	id_list[i].ident = NULL;
-	id_list[i].cert = NULL;
-	id_list[i].privkey = NULL;
-	id_list[i].pubkey = NULL;
-	id_list[i].label = NULL;
-	id_list[i].secaccess = NULL;
-	id_list[i].pkeyhash = NULL;
-
-	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
-					    (const void **)&p_ref)) {
-		os_log_debug(logsys, "Persistent id reference not found");
-		return -1;
-	}
-
-	/*
-	 * Use our shared LAContext and feed it into the query using the
-	 * kSecUseAuthenticationContext key.  We also feed in the persistent
-	 * reference to extract the REAL identity reference (SecIdentityRef).
-	 * This will attach the LAContext to the identity.
-	 */
-
-	values[P_REF_INDEX] = p_ref;
-	values[AUTHC_INDEX] = lacontext;
+	add_dict(&refquery, kSecMatchLimit, kSecMatchLimitOne);
+	add_dict(&refquery, kSecReturnRef, kCFBooleanTrue);
+	add_dict(&refquery, kSecValuePersistentRef, p_ref);
 
 	/*
 	 * It turns out that in some cases (if you are running under
@@ -2439,22 +2408,12 @@ add_identity(CFDictionaryRef dict)
 	 * lacontext.  So if that happens we need to be sure not to
 	 * put the lacontext into our dictionary.  We can't use kCFNull
 	 * because that will cause the SecItemCopyMatching call later
-	 * to fail; just make sure the lacontext is at the end and if
-	 * if lacontext is NULL just subtract one from the dictionary
-	 * item count.
+	 * to fail, so if we don't have a lacontext then don't add it to
+	 * the query dictionary.
 	 */
 
-	numitems = sizeof(keys)/sizeof(keys[0]) - (lacontext ? 0 : 1);
-
-	refquery = CFDictionaryCreate(NULL, keys, values, numitems,
-				      &kCFTypeDictionaryKeyCallBacks,
-				      &kCFTypeDictionaryValueCallBacks);
-
-	if (refquery == NULL) {
-		os_log_debug(logsys, "Persistent ref query dictionary "
-			     "creation returned NULL");
-		return -1;
-	}
+	if (lacontext)
+		add_dict(&refquery, kSecUseAuthenticationContext, lacontext);
 
 	ret = SecItemCopyMatching(refquery, &refresult);
 
@@ -4325,6 +4284,29 @@ get_index_bytes(unsigned int index, unsigned char **retbytes,
 
 	*retbytes = bytes;
 	*retlength = length;
+}
+
+/*
+ * Add to a dictionary (and create the dictionary if needed)
+ */
+
+static bool
+add_dict(CFMutableDictionaryRef *md, const void *key, const void *value)
+{
+	if (*md == NULL) {
+		*md = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+						&kCFTypeDictionaryKeyCallBacks,
+						&kCFTypeDictionaryValueCallBacks);
+		if (*md == NULL) {
+			os_log_debug(logsys, "query dictionary creation "
+				     "returned NULL");
+			return false;
+		}
+	}
+
+	CFDictionaryAddValue(*md, key, value);
+
+	return true;
 }
 
 /*
