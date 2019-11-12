@@ -263,6 +263,11 @@ struct session {
 	SecKeyAlgorithm dec_alg;		/* Decryption algorithm */
 	SecKeyRef	dec_key;		/* Decryption key */
 	size_t		dec_size;		/* Max size of dec, 0 unknown */
+	SecTransformRef trans;			/* Crypto transform handle */
+	CFReadStreamRef rstream;		/* Read stram for transform */
+	CFWriteStreamRef wstream;		/* Write stream for transform */
+	_Atomic bool	transerr;		/* Was there a transform err? */
+	CFDataRef	transout;		/* Transform output */
 };
 
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
@@ -1019,6 +1024,11 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->ver_key = NULL;
 	sess->enc_key = NULL;
 	sess->dec_key = NULL;
+	sess->trans = NULL;
+	sess->rstream = NULL;
+	sess->wstream = NULL;
+	sess->transerr = false;
+	sess->transout = NULL;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1955,7 +1965,34 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	RET(C_Sign, rv); ;
 }
 
-NOTSUPPORTED(C_SignUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
+/*
+ * Support a multi-part signature operation
+ */
+
+CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
+		   CK_ULONG indatalen)
+{
+	struct session *se;
+	CFDataRef inref, outref;
+	CFErrorRef err = NULL;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_SignUpdate);
+
+	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d",
+		     (int) session, indata, (int) indatalen);
+
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_SignUpdate, rv); ;
+}
+
 NOTSUPPORTED(C_SignFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
 NOTSUPPORTED(C_SignRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_SignRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
