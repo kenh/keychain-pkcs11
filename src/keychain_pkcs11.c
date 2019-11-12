@@ -3705,6 +3705,7 @@ build_id_objects(int lock)
 		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
 		b = CK_TRUE;
 		ADD_ATTR(id, CKA_TOKEN, b);
+		ADD_ATTR(id, CKA_LOCAL, b);
 		b = id_list[i].pubcanencrypt;
 		ADD_ATTR(id, CKA_ENCRYPT, b);
 		b = id_list[i].pubcanverify;
@@ -3804,6 +3805,9 @@ build_id_objects(int lock)
 
 		b = CK_TRUE;
 		ADD_ATTR(id, CKA_SENSITIVE, b);
+		ADD_ATTR(id, CKA_ALWAYS_SENSITIVE, b);
+		ADD_ATTR(id, CKA_NEVER_EXTRACTABLE, b);
+		ADD_ATTR(id, CKA_LOCAL, b);
 		b = CK_FALSE;
 		ADD_ATTR(id, CKA_ALWAYS_AUTHENTICATE, b);
 		ADD_ATTR(id, CKA_UNWRAP, b);
