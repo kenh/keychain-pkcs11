@@ -188,7 +188,6 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
-static void transform_task(void *);
 
 /*
  * Our object list and the functions to handle them
@@ -270,6 +269,7 @@ struct session {
 	CFWriteStreamRef wstream;		/* Write stream for transform */
 	_Atomic bool	transerr;		/* Was there a transform err? */
 	CFDataRef	transout;		/* Transform output */
+	dispatch_semaphore_t sema;		/* Signaling semaphore */
 };
 
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
@@ -277,6 +277,8 @@ static unsigned int sess_list_count = 0;
 static unsigned int sess_list_size = 0;
 static void sess_free(struct session *);
 static void sess_list_free(void);
+static void transform_task(void *);
+static void transform_end(struct session *);
 
 /*
  * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
@@ -1031,6 +1033,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->wstream = NULL;
 	sess->transerr = false;
 	sess->transout = NULL;
+	sess->sema = NULL;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1978,9 +1981,10 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		   CK_ULONG indatalen)
 {
 	struct session *se;
-	CFDataRef inref;
 	CFErrorRef err = NULL;
 	CK_RV rv = CKR_OK;
+	unsigned int count = 0;
+	CFIndex cc;
 
 	FUNCINITCHK(C_SignUpdate);
 
@@ -2029,20 +2033,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			goto out;
 		}
 
-		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
-					&se->wstream, 16384);
-		CFWriteStreamOpen(se->wstream);
-		CFReadStreamOpen(se->rstream);
-
-		if (! SecTransformSetAttribute(se->trans,
-					       kSecTransformInputAttributeName,
-					       se->rstream, &err)) {
-			os_log_debug(logsys, "Unable to set input stream for "
-				     "signature transform: %{public}@", err);
-			rv = CKR_GENERAL_ERROR;
-			goto badtrans;
-		}
-
 		if (! SecTransformSetAttribute(se->trans,
 					       kSecDigestTypeAttribute,
 					       se->sig_alg, &err)) {
@@ -2067,26 +2057,29 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			}
 		}
 
+		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
+					&se->wstream, 16384);
+		CFWriteStreamOpen(se->wstream);
+		CFReadStreamOpen(se->rstream);
+
+		if (! SecTransformSetAttribute(se->trans,
+					       kSecTransformInputAttributeName,
+					       se->rstream, &err)) {
+			os_log_debug(logsys, "Unable to set input stream for "
+				     "signature transform: %{public}@", err);
+			rv = CKR_GENERAL_ERROR;
+			goto badtrans;
+		}
+
+		se->sema = dispatch_semaphore_create(0);
+		se->transerr = false;
+
 badtrans:
 		if (dlen)
 			CFRelease(dlen);
 
 		if (rv != CKR_OK) {
-			if (se->rstream) {
-				CFReadStreamClose(se->rstream);
-				se->rstream = NULL;
-			}
-
-			if (se->wstream) {
-				CFWriteStreamClose(se->wstream);
-				se->wstream = NULL;
-			}
-
-			if (se->trans) {
-				CFRelease(se->trans);
-				se->trans = NULL;
-			}
-
+			transform_end(se);
 			goto out;
 		}
 
@@ -2095,6 +2088,53 @@ badtrans:
 			         se, transform_task);
 	}
 
+	/*
+	 * At this point, either the background task has been started,
+	 * or is already running.  Write the requested data to the write
+	 * stream.  Check for any errors; note that we can get a short
+	 * write, so we need a loop.
+	 */
+
+	if (se->transerr) {
+		os_log_debug(logsys, "Aborting operation since our background"
+			     "thread signaled an error");
+		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+		transform_end(se);
+		rv = CKR_GENERAL_ERROR;
+		goto out;
+	}
+
+	do {
+		cc = CFWriteStreamWrite(se->wstream, indata + count,
+					indatalen - count);
+
+		if (cc < 0) {
+			err = CFWriteStreamCopyError(se->wstream);
+
+			if (err) {
+				os_log_debug(logsys, "Error writing to "
+					     "transform stream: %{public}@",
+					     err);
+				CFRelease(err);
+			} else {
+				os_log_debug(logsys, "Error writing to "
+					     "transform stream but no "
+					     "error returned");
+			}
+
+			CFWriteStreamClose(se->wstream);
+			se->wstream = NULL;
+
+			dispatch_semaphore_wait(se->sema,
+						DISPATCH_TIME_FOREVER);
+			transform_end(se);
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+
+		count += cc;
+	} while (count < indatalen);
+
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2102,16 +2142,149 @@ out:
 	RET(C_SignUpdate, rv);
 }
 
+/*
+ * Our thread that does the transform processing.  Signal the semaphore
+ * when we are done.
+ */
+
 static void
 transform_task(void *context)
 {
 	struct session *se = (struct session *) context;
 	CFErrorRef err = NULL;
 
-	CFDataRef result = SecTransformExecute(se->trans, &err);
+	se->transout = SecTransformExecute(se->trans, &err);
+
+	if (! se->transout) {
+		os_log_debug(logsys, "Security transform failed: "
+			     "%{public}@", err);
+		se->transerr = true;
+		CFRelease(err);
+	}
+
+	dispatch_semaphore_signal(se->sema);
 }
 
-NOTSUPPORTED(C_SignFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
+/*
+ * Clean up everything after a transaction has completed.  The semaphore
+ * must be balanced.
+ */
+
+static void
+transform_end(struct session *se)
+{
+	if (se->wstream) {
+		CFWriteStreamClose(se->wstream);
+		se->wstream = NULL;
+	}
+
+	if (se->rstream) {
+		CFReadStreamClose(se->rstream);
+		se->rstream = NULL;
+	}
+
+	if (se->trans) {
+		CFRelease(se->trans);
+		se->trans = NULL;
+	}
+
+	if (se->transout) {
+		CFRelease(se->transout);
+		se->transout = NULL;
+	}
+
+	if (se->sema) {
+		dispatch_release(se->sema);
+		se->sema = NULL;
+	}
+
+	/*
+	 * We only call this when the call is successful or has failed;
+	 * in either case, we are done with this operation.  So always
+	 * clean up the key reference as well.
+	 */
+
+	CFRelease(se->sig_key);
+	se->sig_key = NULL;
+	se->sig_size = 0;
+}
+
+/*
+ * Finalize the signature
+ */
+
+CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
+		  CK_ULONG_PTR siglen)
+{
+	struct session *se;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_SignFinal);
+
+	os_log_debug(logsys, "session = %d, sig = %p, siglen = %d",
+		     (int) session, sig, (int) siglen);
+
+	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * We have to deal with the case where the caller calls us to probe
+	 * the appropriate output buffer size, so we might get called multiple
+	 * times.  Here's the convention we are going to use.
+	 *
+	 * A valid se->trans means we have a transform which is active.
+	 * But a valid se->wstream means that the transform has not been
+	 * closed and waited on.  So IF we have a still-active transaction
+	 * then check to see if the wstream pointer is still valid.  If it
+	 * is, the close the wstream and wait on the semaphore.  At that
+	 * point we should either have an error, or valid data.  Use the
+	 * size from the data to check the buffer size and do the right
+	 * thing if it is too small.
+	 */
+
+	if (! se->trans) {
+		os_log_debug(logsys, "No valid transform found");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+
+	if (se->wstream) {
+		CFWriteStreamClose(se->wstream);
+		se->wstream = NULL;
+		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+
+		if (se->transerr) {
+			rv = CKR_GENERAL_ERROR;
+			transform_end(se);
+			goto out;
+		}
+	}
+
+	if (sig == NULL) {
+		*siglen = CFDataGetLength(se->transout);
+		rv = CKR_OK;
+		goto out;
+	}
+
+	if (*siglen < CFDataGetLength(se->transout)) {
+		*siglen = CFDataGetLength(se->transout);
+		rv = CKR_BUFFER_TOO_SMALL;
+		goto out;
+	}
+
+	*siglen = CFDataGetLength(se->transout);
+	CFDataGetBytes(se->transout, CFRangeMake(0, *siglen), sig);
+
+	transform_end(se);
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_SignFinal, rv);
+}
+
 NOTSUPPORTED(C_SignRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_SignRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
 
