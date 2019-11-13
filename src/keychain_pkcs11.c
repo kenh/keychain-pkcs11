@@ -188,6 +188,7 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
+static void transform_task(void *);
 
 /*
  * Our object list and the functions to handle them
@@ -253,6 +254,7 @@ struct session {
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
 	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
+	CFIndex		sig_dlen;		/* Digest algorithm length */
 	SecKeyRef	sig_key;		/* Key for signing */
 	size_t		sig_size;		/* Size of sig, 0 is unknown */
 	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
@@ -1832,6 +1834,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 				id_list[se->obj_list[object].id_index].privkey;
 			CFRetain(se->sig_key);
 			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+			se->sig_dlen = keychain_mechmap[i].sec_digestlen;
 			if (keychain_mechmap[i].blocksize_out) {
 				se->sig_size = SecKeyGetBlockSize(se->sig_key);
 			} else {
@@ -1927,6 +1930,8 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		os_log_debug(logsys, "SecKeyCreateSignature failed: "
 			     "%{public}@", err);
 		CFRelease(err);
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
 		RET(C_Sign, CKR_GENERAL_ERROR);
 	}
 
@@ -1962,7 +1967,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		}
 	}
 #endif /* KEYCHAIN_DEBUG */
-	RET(C_Sign, rv); ;
+	RET(C_Sign, rv);
 }
 
 /*
@@ -1973,7 +1978,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		   CK_ULONG indatalen)
 {
 	struct session *se;
-	CFDataRef inref, outref;
+	CFDataRef inref;
 	CFErrorRef err = NULL;
 	CK_RV rv = CKR_OK;
 
@@ -1987,10 +1992,123 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
+	/*
+	 * If we don't have a pending signature operation, then
+	 * start that now.
+	 *
+	 * The SecTransform API is relatively generic and in the normal
+	 * use case you feed in your input blob via a CFDataRef using
+	 * the kSecTransformInputAttributeName attribute.  But we can't do
+	 * that because that will only permit one input chunk and this
+	 * API requires we support an indefinite number.
+	 *
+	 * It turns out that INSTEAD of setting that attribute to a
+	 * CFDataRef, you can also set it to a CFReadStreamRef.  Then
+	 * the transform function will use that stream as an input source.
+	 * If you create a "bound pair" of stream objects, you can write
+	 * data to the write stream and the transform function will
+	 * read the corresponding data on the read stream.
+	 *
+	 * Unfortunately, you have to run the transform function in
+	 * another thread, and some simple experiments suggests that
+	 * you lose a lot of performance because of locking in the
+	 * stream library.  But at least the API should be stable for
+	 * a while.
+	 */
+
+	if (! se->trans) {
+		CFNumberRef dlen = NULL;
+
+		se->trans = SecSignTransformCreate(se->sig_key, &err);
+
+		if (! se->trans) {
+			os_log_debug(logsys, "SecSignTransformCreate "
+				     "failed: %{public}@", err);
+			CFRelease(err);
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+
+		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
+					&se->wstream, 16384);
+		CFWriteStreamOpen(se->wstream);
+		CFReadStreamOpen(se->rstream);
+
+		if (! SecTransformSetAttribute(se->trans,
+					       kSecTransformInputAttributeName,
+					       se->rstream, &err)) {
+			os_log_debug(logsys, "Unable to set input stream for "
+				     "signature transform: %{public}@", err);
+			rv = CKR_GENERAL_ERROR;
+			goto badtrans;
+		}
+
+		if (! SecTransformSetAttribute(se->trans,
+					       kSecDigestTypeAttribute,
+					       se->sig_alg, &err)) {
+			os_log_debug(logsys, "Unable to set digest algorithm "
+				     "for transform: %{public}@", err);
+			rv = CKR_GENERAL_ERROR;
+			goto badtrans;
+		}
+
+		if (se->sig_dlen) {
+			dlen = CFNumberCreate(NULL, kCFNumberCFIndexType,
+					      &se->sig_dlen);
+
+			if (! SecTransformSetAttribute(se->trans,
+						       kSecDigestLengthAttribute,
+						       dlen, &err)) {
+				os_log_debug(logsys, "Unable to set digest "
+					     "algorithm length for "
+					     "transform: %{public}@", err);
+				rv = CKR_GENERAL_ERROR;
+				goto badtrans;
+			}
+		}
+
+badtrans:
+		if (dlen)
+			CFRelease(dlen);
+
+		if (rv != CKR_OK) {
+			if (se->rstream) {
+				CFReadStreamClose(se->rstream);
+				se->rstream = NULL;
+			}
+
+			if (se->wstream) {
+				CFWriteStreamClose(se->wstream);
+				se->wstream = NULL;
+			}
+
+			if (se->trans) {
+				CFRelease(se->trans);
+				se->trans = NULL;
+			}
+
+			goto out;
+		}
+
+		dispatch_async_f(dispatch_get_global_queue(
+				  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+			         se, transform_task);
+	}
+
+out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
-	RET(C_SignUpdate, rv); ;
+	RET(C_SignUpdate, rv);
+}
+
+static void
+transform_task(void *context)
+{
+	struct session *se = (struct session *) context;
+	CFErrorRef err = NULL;
+
+	CFDataRef result = SecTransformExecute(se->trans, &err);
 }
 
 NOTSUPPORTED(C_SignFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG_PTR siglen))
