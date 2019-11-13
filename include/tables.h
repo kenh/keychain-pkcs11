@@ -41,6 +41,7 @@ struct mechanism_map {
 	 */
 	const SecKeyAlgorithm	*sec_encmech;	/* Security mech for enc */
 	const SecKeyAlgorithm	*sec_signmech;	/* Security mech for sign */
+	const SecKeyAlgorithm	*sec_dsignmech;	/* Mech for sign, take dgst */
 	const CFStringRef	*sec_digest;	/* Digest type used */
 	unsigned int		sec_digestlen;	/* Digest length */
 	bool			blocksize_out;	/* Is block size output? */

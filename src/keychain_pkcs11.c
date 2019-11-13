@@ -253,6 +253,8 @@ struct session {
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
 	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
+	SecKeyAlgorithm sig_dalg;		/* Signing alg, take digest */
+	CFStringRef	sig_dtype;		/* Digest algorithm */
 	CFIndex		sig_dlen;		/* Digest algorithm length */
 	SecKeyRef	sig_key;		/* Key for signing */
 	size_t		sig_size;		/* Size of sig, 0 is unknown */
@@ -1837,6 +1839,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 				id_list[se->obj_list[object].id_index].privkey;
 			CFRetain(se->sig_key);
 			se->sig_alg = *keychain_mechmap[i].sec_signmech;
+			se->sig_dalg = *keychain_mechmap[i].sec_dsignmech;
+			se->sig_dtype = *keychain_mechmap[i].sec_digest;
 			se->sig_dlen = keychain_mechmap[i].sec_digestlen;
 			if (keychain_mechmap[i].blocksize_out) {
 				se->sig_size = SecKeyGetBlockSize(se->sig_key);
@@ -2021,41 +2025,37 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	 */
 
 	if (! se->trans) {
-		CFNumberRef dlen = NULL;
+		/*
+		 * Sigh.  Curse you Apple, once again.
+		 *
+		 * In a perfect world we'd just use SecSignTransformCreate()
+		 * to create the desired signature transform.  But it turns
+		 * out THAT doesn't work with the "new world" smartcard
+		 * API.  The failure there seems to be that underneath
+		 * the hood the SecSignTransform APIs call the old CSSM
+		 * APIs, and those seem to fail if the key is NOT in a
+		 * Keychain .. and guess what, the new world smartcard
+		 * keys are NOT in any Keychain.
+		 *
+		 * But, there is a solution.  We can use the transform
+		 * API to calculate the DIGEST, and then call the appropriate
+		 * function to encrypt the digest which will result in the
+		 * correct signature.  At least Apple provides crypto
+		 * algorithms designed to take digests so we don't have to
+		 * generate an ASN.1 structure with the right OID in it.
+		 */
 
-		se->trans = SecSignTransformCreate(se->sig_key, &err);
+		se->trans = SecDigestTransformCreate(se->sig_dtype,
+						     se->sig_dlen, &err);
 
 		if (! se->trans) {
-			os_log_debug(logsys, "SecSignTransformCreate "
+			os_log_debug(logsys, "SecDigestTransformCreate "
 				     "failed: %{public}@", err);
 			CFRelease(err);
 			rv = CKR_GENERAL_ERROR;
 			goto out;
 		}
 
-		if (! SecTransformSetAttribute(se->trans,
-					       kSecDigestTypeAttribute,
-					       se->sig_alg, &err)) {
-			os_log_debug(logsys, "Unable to set digest algorithm "
-				     "for transform: %{public}@", err);
-			rv = CKR_GENERAL_ERROR;
-			goto badtrans;
-		}
-
-		if (se->sig_dlen) {
-			dlen = CFNumberCreate(NULL, kCFNumberCFIndexType,
-					      &se->sig_dlen);
-
-			if (! SecTransformSetAttribute(se->trans,
-						       kSecDigestLengthAttribute,
-						       dlen, &err)) {
-				os_log_debug(logsys, "Unable to set digest "
-					     "algorithm length for "
-					     "transform: %{public}@", err);
-				rv = CKR_GENERAL_ERROR;
-				goto badtrans;
-			}
-		}
 
 		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
 					&se->wstream, 16384);
@@ -2075,9 +2075,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		se->transerr = false;
 
 badtrans:
-		if (dlen)
-			CFRelease(dlen);
-
 		if (rv != CKR_OK) {
 			transform_end(se);
 			goto out;
@@ -2218,11 +2215,12 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 {
 	struct session *se;
 	CK_RV rv = CKR_OK;
+	CFErrorRef err = NULL;
 
 	FUNCINITCHK(C_SignFinal);
 
 	os_log_debug(logsys, "session = %d, sig = %p, siglen = %d",
-		     (int) session, sig, (int) siglen);
+		     (int) session, sig, (int) *siglen);
 
 	CHECKSESSION(session, se);
 
@@ -2239,9 +2237,14 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 	 * closed and waited on.  So IF we have a still-active transaction
 	 * then check to see if the wstream pointer is still valid.  If it
 	 * is, the close the wstream and wait on the semaphore.  At that
-	 * point we should either have an error, or valid data.  Use the
-	 * size from the data to check the buffer size and do the right
-	 * thing if it is too small.
+	 * point we should either have an error, or valid signature data.
+	 *
+	 * Because it is possible to get calls to query the output
+	 * buffer size, we're going to slightly cheat here.  The first
+	 * time we get called, we will generate the signature completely
+	 * and store it in transout.  That will allow us to get the final
+	 * output buffer size and return it if it is a query to just
+	 * return the buffer size.
 	 */
 
 	if (! se->trans) {
@@ -2251,6 +2254,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 	}
 
 	if (se->wstream) {
+		CFDataRef final = NULL;
 		CFWriteStreamClose(se->wstream);
 		se->wstream = NULL;
 		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
@@ -2260,6 +2264,27 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 			transform_end(se);
 			goto out;
 		}
+
+		/*
+		 * at this point, transout contains the digest.  Call
+		 * the appropriate function to generate a signature of
+		 * it.  We should be using the "Digest" form of the
+		 * algorithm.
+		 */
+
+		final = SecKeyCreateSignature(se->sig_key, se->sig_dalg,
+					      se->transout, &err);
+
+		if (! final) {
+			os_log_debug(logsys, "SecKeyCreateSignature failed: "
+				     "%{public}@", err);
+			CFRelease(err);
+			rv = CKR_GENERAL_ERROR;
+			transform_end(se);
+			goto out;
+		}
+		CFRelease(se->transout);
+		se->transout = final;
 	}
 
 	if (sig == NULL) {
