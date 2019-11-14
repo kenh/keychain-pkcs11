@@ -51,6 +51,26 @@ extern struct mechanism_map keychain_mechmap[];
 extern unsigned int keychain_mechmap_size;
 
 /*
+ * Table used for mapping beween Cryptoki algorithms/parameters
+ * and Apple Security constants.
+ */
+
+enum alg_family { OAEP, PSS };
+
+struct param_map {
+	CK_MECHANISM_TYPE	base_type;	/* Base mechanism type */
+	CK_MECHANISM_TYPE	hash_alg;	/* Hash algorithm used */
+	CK_RSA_PKCS_MGF_TYPE	mgf;		/* Message Gen Function used */
+	CK_ULONG		slen;		/* Salt length (PSS) */
+	enum alg_family		family;		/* Algorithm family */
+	const SecKeyAlgorithm	*alg;		/* Security algorithm type */
+	const SecKeyAlgorithm	*dalg;		/* Digest algorithm type */
+};
+
+extern struct param_map keychain_param_map[];
+extern unsigned int keychain_param_map_size;
+
+/*
  * Table used for mapping between Cryptoki key types and Security
  * framework key types.  The same rules apply as above; we use pointers
  * to the Security framework constants so they can be resolved at compile

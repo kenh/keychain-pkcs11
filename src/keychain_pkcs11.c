@@ -188,6 +188,9 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
+static struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
+static bool mech_param_validate(CK_MECHANISM_PTR, struct mechanism_map *,
+				CFStringRef *, CFStringRef *);
 
 /*
  * Our object list and the functions to handle them
@@ -1440,12 +1443,15 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		    CK_OBJECT_HANDLE object)
 {
 	struct session *se;
+	struct mechanism_map *mm;
+	CK_RV rv = CKR_OK;
 	int i;
 
 	FUNCINITCHK(C_EncryptInit);
 
 	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (! mech) {
@@ -1474,7 +1480,32 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	/*
-	 * Map our mechanism onto what we need for signing
+	 * Map our mechanism to the Apple Security framework information
+	 * we need.
+	 */
+
+	mm = get_mechmap(mech->mechanism);
+
+	/*
+	 * Make sure we got a valid mechanism and that we can use it for
+	 * encryption.
+	 */
+
+	if (! mm || (mm->usage_flags & CKF_ENCRYPT) == 0) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
+	}
+
+	/*
+	 * Validate the mechanism parameters.  The Apple Security framework
+	 * doesn't really allow us to specify all crypto parameters for
+	 * things like OAEP and PSS (specifically, the encoding parameter
+	 * for OAEP salt lengths for PSS that do not match the hash size)
+	 * So checking the mechanism parameters has two purposes.
+	 * First, we want to map a particular mechanism/parameter
+	 * combination to the algorithm specified in the Security framework.
+	 * Secondly, if the parameters are ones that we don't support
+	 * then we need to return an error.
 	 */
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
@@ -1497,6 +1528,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		}
 	}
 
+out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
@@ -4814,6 +4846,39 @@ get_index_bytes(unsigned int index, unsigned char **retbytes,
 	*retbytes = bytes;
 	*retlength = length;
 }
+
+/*
+ * Return a pointer to the mechanism mapping structure, which contains
+ * the mappings from the Cryptoki mechanism name to the constants used by
+ * the Apple Security framework
+ */
+
+static struct mechanism_map *
+get_mechmap(CK_MECHANISM_TYPE mechtype)
+{
+	int i;
+
+	for (i = 0; i < keychain_mechmap_size) {
+		if (mechtype == keychain_mechmap[i])
+			return &keychain_mechmap[i];
+	}
+
+	return NULL;
+}
+
+/*
+ * Validate the mechanism params (if given) and map the mechanism and
+ * parameters to Security framework algorithms
+ */
+
+static bool
+mech_param_validate(CK_MECHANISM_PTR *mptr, struct mechanism_map *mechmap,
+		    SecKeyAlgorithm *alg, SecKeyAlgorithm *dalg)
+{
+
+	return true;
+}
+	
 
 /*
  * Add to a dictionary (and create the dictionary if needed)
