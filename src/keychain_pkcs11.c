@@ -4882,6 +4882,31 @@ sess_free(struct session *se)
 	if (se->dec_key)
 		CFRelease(se->dec_key);
 
+	if (se->wstream) {
+		/*
+		 * If there's an open write stream, then we should
+		 * assume there is a transaction in progress; wait
+		 * for the semaphore to indicate things are finished.
+		 */
+		CFWriteStreamClose(se->wstream);
+
+		if (se->sema)
+			dispatch_semaphore_wait(se->sema,
+						DISPATCH_TIME_FOREVER);
+	}
+
+	if (se->rstream)
+		CFReadStreamClose(se->rstream);
+
+	if (se->trans)
+		CFRelease(se->trans);
+
+	if (se->sema)
+		dispatch_release(se->sema);
+
+	if (se->transout)
+		CFRelease(se->transout);
+
 	UNLOCK_MUTEX(se->mutex);
 	DESTROY_MUTEX(se->mutex);
 	free(se);
