@@ -252,14 +252,12 @@ struct session {
 	unsigned int	obj_search_index;	/* Current search index */
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
-	SecKeyAlgorithm	sig_alg;		/* Signing algorithm */
-	SecKeyAlgorithm sig_dalg;		/* Signing alg, take digest */
-	CFStringRef	sig_dtype;		/* Digest algorithm */
-	CFIndex		sig_dlen;		/* Digest algorithm length */
-	SecKeyRef	sig_key;		/* Key for signing */
-	size_t		sig_size;		/* Size of sig, 0 is unknown */
-	SecKeyAlgorithm ver_alg;		/* Verify algorithm */
-	SecKeyRef	ver_key;		/* Verify key */
+	SecKeyRef	key;			/* Key for in-progress op */
+	size_t		outsize;		/* Op output size, 0 unknown */
+	SecKeyAlgorithm	alg;			/* Algorithm for in-prog op */
+	SecKeyAlgorithm dalg;			/* Algorithm, takes digest */
+	CFStringRef	digest;			/* Digest algorithm */
+	CFIndex		diglen;			/* Digest algorithm length */
 	SecKeyAlgorithm enc_alg;		/* Encryption algorithm */
 	SecKeyRef	enc_key;		/* Encryption key */
 	size_t		enc_size;		/* Size of enc, 0 is unknown */
@@ -1026,8 +1024,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->slot_id = slot_id;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
-	sess->sig_key = NULL;
-	sess->ver_key = NULL;
+	sess->key = NULL;
 	sess->enc_key = NULL;
 	sess->dec_key = NULL;
 	sess->trans = NULL;
@@ -1833,19 +1830,19 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->sig_key)
-				CFRelease(se->sig_key);
-			se->sig_key =
+			if (se->key)
+				CFRelease(se->key);
+			se->key =
 				id_list[se->obj_list[object].id_index].privkey;
-			CFRetain(se->sig_key);
-			se->sig_alg = *keychain_mechmap[i].sec_signmech;
-			se->sig_dalg = *keychain_mechmap[i].sec_dsignmech;
-			se->sig_dtype = *keychain_mechmap[i].sec_digest;
-			se->sig_dlen = keychain_mechmap[i].sec_digestlen;
+			CFRetain(se->key);
+			se->alg = *keychain_mechmap[i].sec_signmech;
+			se->dalg = *keychain_mechmap[i].sec_dsignmech;
+			se->digest = *keychain_mechmap[i].sec_digest;
+			se->diglen = keychain_mechmap[i].sec_digestlen;
 			if (keychain_mechmap[i].blocksize_out) {
-				se->sig_size = SecKeyGetBlockSize(se->sig_key);
+				se->outsize = SecKeyGetBlockSize(se->key);
 			} else {
-				se->sig_size = 0;
+				se->outsize = 0;
 			}
 
 			UNLOCK_MUTEX(se->mutex);
@@ -1903,24 +1900,24 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	 */
 
 	if (! sig) {
-		if (! se->sig_size) {
+		if (! se->outsize) {
 			/* Hmm, what to do here?  No idea! */
 			UNLOCK_MUTEX(se->mutex);
 			UNLOCK_MUTEX(id_mutex);
 			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
 		}
-		*siglen = se->sig_size;
+		*siglen = se->outsize;
 		os_log_debug(logsys, "sig is NULL, returning an output "
-			     "size of %d", (int) se->sig_size);
+			     "size of %d", (int) se->outsize);
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
 		RET(C_Sign, CKR_OK);
 	}
 
-	if (se->sig_size && se->sig_size > *siglen) {
+	if (se->outsize && se->outsize > *siglen) {
 		os_log_debug(logsys, "Output size is %d, but our output "
-			     "buffer is %d", (int) se->sig_size, (int) *siglen);
-		*siglen = se->sig_size;
+			     "buffer is %d", (int) se->outsize, (int) *siglen);
+		*siglen = se->outsize;
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
 		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
@@ -1929,7 +1926,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 
-	outref = SecKeyCreateSignature(se->sig_key, se->sig_alg, inref, &err);
+	outref = SecKeyCreateSignature(se->key, se->alg, inref, &err);
 
 	CFRelease(inref);
 
@@ -1949,9 +1946,9 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		/*
 		 * If the signature was successful, release our key reference
 		 */
-		CFRelease(se->sig_key);
-		se->sig_key = NULL;
-		se->sig_size = 0;
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
 	}
 
 	*siglen = CFDataGetLength(outref);
@@ -2045,8 +2042,8 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		 * generate an ASN.1 structure with the right OID in it.
 		 */
 
-		se->trans = SecDigestTransformCreate(se->sig_dtype,
-						     se->sig_dlen, &err);
+		se->trans = SecDigestTransformCreate(se->digest,
+						     se->diglen, &err);
 
 		if (! se->trans) {
 			os_log_debug(logsys, "SecDigestTransformCreate "
@@ -2201,9 +2198,9 @@ transform_end(struct session *se)
 	 * clean up the key reference as well.
 	 */
 
-	CFRelease(se->sig_key);
-	se->sig_key = NULL;
-	se->sig_size = 0;
+	CFRelease(se->key);
+	se->key = NULL;
+	se->outsize = 0;
 }
 
 /*
@@ -2272,7 +2269,7 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 		 * algorithm.
 		 */
 
-		final = SecKeyCreateSignature(se->sig_key, se->sig_dalg,
+		final = SecKeyCreateSignature(se->key, se->dalg,
 					      se->transout, &err);
 
 		if (! final) {
@@ -2355,12 +2352,14 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->ver_key)
-				CFRelease(se->ver_key);
-			se->ver_key =
-				id_list[se->obj_list[key].id_index].pubkey;
-			CFRetain(se->ver_key);
-			se->ver_alg = *keychain_mechmap[i].sec_signmech;
+			if (se->key)
+				CFRelease(se->key);
+			se->key = id_list[se->obj_list[key].id_index].pubkey;
+			CFRetain(se->key);
+			se->alg = *keychain_mechmap[i].sec_signmech;
+			se->dalg = *keychain_mechmap[i].sec_dsignmech;
+			se->digest = *keychain_mechmap[i].sec_digest;
+			se->diglen = keychain_mechmap[i].sec_digestlen;
 			UNLOCK_MUTEX(se->mutex);
 			UNLOCK_MUTEX(id_mutex);
 			RET(C_VerifyInit, CKR_OK);
@@ -2397,7 +2396,7 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	if (!SecKeyVerifySignature(se->ver_key, se->ver_alg, inref, sigref,
+	if (!SecKeyVerifySignature(se->key, se->alg, inref, sigref,
 				   &err)) {
 		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
 		CFRelease(err);
@@ -2408,8 +2407,8 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	 * Always release the key reference at this point
 	 */
 
-	CFRelease(se->ver_key);
-	se->ver_key = NULL;
+	CFRelease(se->key);
+	se->key = NULL;
 
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2419,8 +2418,181 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	RET(C_Verify, rv);
 }
 
-NOTSUPPORTED(C_VerifyUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen))
-NOTSUPPORTED(C_VerifyFinal, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG siglen))
+CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
+		     CK_ULONG indatalen)
+{
+	struct session *se;
+	CFErrorRef err = NULL;
+	CK_RV rv = CKR_OK;
+	unsigned int count = 0;
+	CFIndex cc;
+
+	FUNCINITCHK(C_VerifyUpdate);
+
+	os_log_debug(logsys, "session = %d, indata = %p, indatalen = %d",
+		     (int) session, indata, (int) indatalen);
+
+	CHECKSESSION(session, se);
+
+	if (! se->trans) {
+
+		/*
+		 * See the comments in C_SignUpdate for what is going on
+		 * in this section.
+		 */
+
+		se->trans = SecDigestTransformCreate(se->digest,
+						     se->diglen, &err);
+
+		if (! se->trans) {
+			os_log_debug(logsys, "SecDigestTransformCreate "
+				     "failed: %{public}@", err);
+			CFRelease(err);
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+
+		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
+					&se->wstream, 16384);
+		CFWriteStreamOpen(se->wstream);
+		CFReadStreamOpen(se->rstream);
+
+		if (! SecTransformSetAttribute(se->trans,
+					       kSecTransformInputAttributeName,
+					       se->rstream, &err)) {
+			os_log_debug(logsys, "Unable to set input stream for "
+				     "verify transform: %{public}@", err);
+			rv = CKR_GENERAL_ERROR;
+			goto badtrans;
+		}
+
+		se->sema = dispatch_semaphore_create(0);
+		se->transerr = false;
+
+badtrans:
+		if (rv != CKR_OK) {
+			transform_end(se);
+			goto out;
+		}
+
+		dispatch_async_f(dispatch_get_global_queue(
+				  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+			         se, transform_task);
+	}
+
+	/*
+	 * At this point, either the background task has been started,
+	 * or is already running.  Write the requested data to the write
+	 * stream.  Check for any errors; note that we can get a short
+	 * write, so we need a loop.
+	 */
+
+	if (se->transerr) {
+		os_log_debug(logsys, "Aborting operation since our background"
+			     "thread signaled an error");
+		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+		transform_end(se);
+		rv = CKR_GENERAL_ERROR;
+		goto out;
+	}
+
+	do {
+		cc = CFWriteStreamWrite(se->wstream, indata + count,
+					indatalen - count);
+
+		if (cc < 0) {
+			err = CFWriteStreamCopyError(se->wstream);
+
+			if (err) {
+				os_log_debug(logsys, "Error writing to "
+					     "transform stream: %{public}@",
+					     err);
+				CFRelease(err);
+			} else {
+				os_log_debug(logsys, "Error writing to "
+					     "transform stream but no "
+					     "error returned");
+			}
+
+			CFWriteStreamClose(se->wstream);
+			se->wstream = NULL;
+
+			dispatch_semaphore_wait(se->sema,
+						DISPATCH_TIME_FOREVER);
+			transform_end(se);
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+
+		count += cc;
+	} while (count < indatalen);
+
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_VerifyUpdate, rv);
+}
+
+
+CK_RV C_VerifyFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
+		    CK_ULONG siglen)
+{
+	struct session *se;
+	CFDataRef sigdata = NULL;
+	CFErrorRef err = NULL;
+	CK_RV rv = CKR_OK;
+
+	FUNCINITCHK(C_VerifyFinal);
+
+	os_log_debug(logsys, "session = %d, sig = %p, siglen = %d",
+		     (int) session, sig, (int) siglen);
+
+	CHECKSESSION(session, se);
+
+	sigdata = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
+					      kCFAllocatorNull);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * At least this is simpler than C_SignFinal.  Close the write
+	 * stream, wait for the digest to complete, and then try to
+	 * verify it against the signature.
+	 */
+
+	if (! se->trans) {
+		os_log_debug(logsys, "No valid transform found");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+
+	CFWriteStreamClose(se->wstream);
+	se->wstream = NULL;
+	dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+
+	if (se->transerr) {
+		rv = CKR_GENERAL_ERROR;
+		transform_end(se);
+		goto out;
+	}
+
+	if (!SecKeyVerifySignature(se->key, se->dalg, se->transout, sigdata,
+				   &err)) {
+		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
+		CFRelease(err);
+		rv = CKR_SIGNATURE_INVALID;
+	}
+
+	transform_end(se);
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+	CFRelease(sigdata);
+
+	RET(C_SignFinal, rv);
+}
 NOTSUPPORTED(C_VerifyRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_VerifyRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG siglen, CK_BYTE_PTR outdata, CK_ULONG_PTR outdatalen))
 NOTSUPPORTED(C_DigestEncryptUpdate, (CK_SESSION_HANDLE session, CK_BYTE_PTR inpart, CK_ULONG inpartlen, CK_BYTE_PTR outdata, CK_ULONG_PTR outdatalen))
@@ -4701,11 +4873,8 @@ sess_free(struct session *se)
 
 	free(se->search_attrs);
 
-	if (se->sig_key)
-		CFRelease(se->sig_key);
-
-	if (se->ver_key)
-		CFRelease(se->ver_key);
+	if (se->key)
+		CFRelease(se->key);
 
 	if (se->enc_key)
 		CFRelease(se->enc_key);
