@@ -835,6 +835,19 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
+	    if (attr_filename) {
+		FILE *f = fopen(attr_filename, "w");
+
+		if (! f) {
+			fprintf(stderr, "Cannot open %s: %s\n", attr_filename,
+				strerror(errno));
+			exit(1);
+		}
+
+		fwrite(out, 1, outlen, f);
+		fclose(f);
+	    }
+
 	    printf("Encrypted output for \"%s\":\n", (char *) enc->data);
 
 	    printf("Encrypted data: %lu bytes, data = 0x", outlen);
