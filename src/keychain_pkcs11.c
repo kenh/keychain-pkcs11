@@ -1665,6 +1665,12 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		RET(C_DecryptInit, CKR_KEY_TYPE_INCONSISTENT);
 	}
 
+	if (! id_list[se->obj_list[key].id_index].privcandecrypt) {
+		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
+		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+	}
+
 	/*
 	 * See the comments in C_EncryptInit() for what is going on here
 	 */
@@ -1831,11 +1837,13 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	if (object >= se->obj_list_count) {
 		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
 		RET(C_SignInit, CKR_KEY_HANDLE_INVALID);
 	}
 
 	if (! id_list[se->obj_list[object].id_index].privcansign) {
 		UNLOCK_MUTEX(se->mutex);
+		UNLOCK_MUTEX(id_mutex);
 		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
 	}
 
