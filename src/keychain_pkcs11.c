@@ -188,9 +188,10 @@ static CK_KEY_TYPE convert_keytype(CFNumberRef);
 static void token_logout(void);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
-static struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
-static bool mech_param_validate(CK_MECHANISM_PTR, struct mechanism_map *,
-				CFStringRef *, CFStringRef *);
+static const struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
+static bool mech_param_validate(CK_MECHANISM_PTR, const struct mechanism_map *,
+				SecKeyAlgorithm *, SecKeyAlgorithm *,
+				SecKeyAlgorithm *);
 
 /*
  * Our object list and the functions to handle them
@@ -1443,9 +1444,8 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		    CK_OBJECT_HANDLE object)
 {
 	struct session *se;
-	struct mechanism_map *mm;
+	const struct mechanism_map *mm;
 	CK_RV rv = CKR_OK;
-	int i;
 
 	FUNCINITCHK(C_EncryptInit);
 
@@ -1465,8 +1465,8 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	object--;
 
 	if (object >= se->obj_list_count) {
-		UNLOCK_MUTEX(se->mutex);
-		RET(C_EncryptInit, CKR_KEY_HANDLE_INVALID);
+		rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
 	}
 
 	/*
@@ -1474,9 +1474,8 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 */
 
 	if (se->obj_list[object].class != CKO_PUBLIC_KEY) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_EncryptInit, CKR_KEY_TYPE_INCONSISTENT);
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
 	}
 
 	/*
@@ -1508,31 +1507,27 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 * then we need to return an error.
 	 */
 
-	for (i = 0; i < keychain_mechmap_size; i++) {
-		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->enc_key)
-				CFRelease(se->enc_key);
-			se->enc_key =
-				id_list[se->obj_list[object].id_index].pubkey;
-			CFRetain(se->enc_key);
-			se->enc_alg = *keychain_mechmap[i].sec_encmech;
-			if (keychain_mechmap[i].blocksize_out) {
-				se->enc_size = SecKeyGetBlockSize(se->enc_key);
-			} else {
-				se->enc_size = 0;
-			}
-
-			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
-			RET(C_EncryptInit, CKR_OK);
-		}
+	if (! mech_param_validate(mech, mm, &se->enc_alg, NULL, NULL)) {
+		rv = CKR_MECHANISM_PARAM_INVALID;
+		goto out;
 	}
+
+	if (se->enc_key)
+		CFRelease(se->enc_key);
+
+	se->enc_key = id_list[se->obj_list[object].id_index].pubkey;
+	CFRetain(se->enc_key);
+
+	if (mm->blocksize_out)
+		se->enc_size = SecKeyGetBlockSize(se->enc_key);
+	else
+		se->enc_size = 0;
 
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
-	RET(C_EncryptInit, CKR_MECHANISM_INVALID);
+	RET(C_EncryptInit, rv);
 }
 
 CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
@@ -1548,7 +1543,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
@@ -1572,7 +1566,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		os_log_debug(logsys, "outdata is NULL, returning an output "
 			     "size of %d", (int) se->enc_size);
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_Encrypt, CKR_OK);
 	}
 
@@ -1582,7 +1575,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     (int) *outdatalen);
 		*outdatalen = se->enc_size;
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
 	}
 
@@ -1599,6 +1591,10 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     "%{public}@ (%ld)", err,
 			     (long) CFErrorGetCode(err));
 		CFRelease(err);
+		CFRelease(se->enc_key);
+		se->enc_key = NULL;
+		se->enc_size = 0;
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_Encrypt, CKR_GENERAL_ERROR);
 	}
 
@@ -1620,7 +1616,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	CFRelease(outref);
 
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Encrypt, rv);
 }
@@ -1636,7 +1631,8 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		    CK_OBJECT_HANDLE key)
 {
 	struct session *se;
-	int i;
+	const struct mechanism_map *mm;
+	CK_RV rv = CKR_OK;
 
 	FUNCINITCHK(C_DecryptInit);
 
@@ -1670,38 +1666,37 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	/*
-	 * Map our mechanism onto what we need for signing
+	 * See the comments in C_EncryptInit() for what is going on here
 	 */
 
-	for (i = 0; i < keychain_mechmap_size; i++) {
-		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->dec_key)
-				CFRelease(se->dec_key);
-			se->dec_key =
-				id_list[se->obj_list[key].id_index].privkey;
-			CFRetain(se->dec_key);
-			/*
-			 * Yeah, we're using the same algorithm for encryption
-			 * and decryption here.  If this changes we'll need to
-			 * expand the tables to support mixed algorithms.
-			 */
-			se->dec_alg = *keychain_mechmap[i].sec_encmech;
-			if (keychain_mechmap[i].blocksize_out) {
-				se->dec_size = SecKeyGetBlockSize(se->dec_key);
-			} else {
-				se->dec_size = 0;
-			}
+	mm = get_mechmap(mech->mechanism);
 
-			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
-			RET(C_DecryptInit, CKR_OK);
-		}
+	if (! mm || (mm->usage_flags & CKF_DECRYPT) == 0) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
 	}
 
+	if (! mech_param_validate(mech, mm, &se->dec_alg, NULL, NULL)) {
+		rv = CKR_MECHANISM_PARAM_INVALID;
+		goto out;
+	}
+
+	if (se->dec_key)
+		CFRelease(se->dec_key);
+
+	se->dec_key = id_list[se->obj_list[key].id_index].privkey;
+	CFRetain(se->dec_key);
+
+	if (mm->blocksize_out)
+		se->dec_size = SecKeyGetBlockSize(se->dec_key);
+	else
+		se->enc_size = 0;
+
+out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
-	RET(C_DecryptInit, CKR_MECHANISM_INVALID);
+	RET(C_DecryptInit, rv);
 }
 
 
@@ -1718,7 +1713,6 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
@@ -1743,14 +1737,12 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		if (! se->dec_size) {
 			/* Hmm, what to do here?  No idea! */
 			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
 			RET(C_Decrypt, CKR_BUFFER_TOO_SMALL);
 		}
 		*outdatalen = se->dec_size;
 		os_log_debug(logsys, "outdata is NULL, returning an output "
 			     "size of %d", (int) se->dec_size);
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_Decrypt, CKR_OK);
 	}
 
@@ -1760,7 +1752,6 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     (int) *outdatalen);
 		*outdatalen = se->dec_size;
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_Decrypt, CKR_BUFFER_TOO_SMALL);
 	}
 
@@ -1777,6 +1768,10 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     "%{public}@ (%ld)", err,
 			     (long) CFErrorGetCode(err));
 		CFRelease(err);
+		CFRelease(se->dec_key);
+		se->dec_key = NULL;
+		se->dec_size = 0;
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_Decrypt, CKR_GENERAL_ERROR);
 	}
 
@@ -1798,7 +1793,6 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	CFRelease(outref);
 
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Decrypt, rv);
 }
@@ -4853,13 +4847,13 @@ get_index_bytes(unsigned int index, unsigned char **retbytes,
  * the Apple Security framework
  */
 
-static struct mechanism_map *
+const static struct mechanism_map *
 get_mechmap(CK_MECHANISM_TYPE mechtype)
 {
 	int i;
 
-	for (i = 0; i < keychain_mechmap_size) {
-		if (mechtype == keychain_mechmap[i])
+	for (i = 0; i < keychain_mechmap_size; i++) {
+		if (mechtype == keychain_mechmap[i].cki_mech)
 			return &keychain_mechmap[i];
 	}
 
@@ -4872,9 +4866,145 @@ get_mechmap(CK_MECHANISM_TYPE mechtype)
  */
 
 static bool
-mech_param_validate(CK_MECHANISM_PTR *mptr, struct mechanism_map *mechmap,
-		    SecKeyAlgorithm *alg, SecKeyAlgorithm *dalg)
+mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
+		    SecKeyAlgorithm *encalg, SecKeyAlgorithm *signalg,
+		    SecKeyAlgorithm *dsignalg)
 {
+	CK_RSA_PKCS_OAEP_PARAMS_PTR oaep;
+	CK_RSA_PKCS_PSS_PARAMS_PTR pss;
+	int i;
+
+	/*
+	 * Handle the various type of mechanism parameters
+	 */
+
+	switch (mechmap->parameters) {
+	case NONE:
+		/*
+		 * We can just return the algorithms.  But we shouldn't
+		 * be taking any parameters, so return an error if we
+		 * do.
+		 */
+
+		if (mptr->pParameter != NULL || mptr->ulParameterLen != 0) {
+			os_log_debug(logsys, "Error: mechanism should not "
+				     "take a parameter, but it looks like "
+				     "we got one (pParameter = %p, len = %d)",
+				     mptr->pParameter,
+				     (int) mptr->ulParameterLen);
+			return false;
+		}
+
+		if (encalg)
+			*encalg = *mechmap->sec_encmech;
+
+		if (signalg)
+			*signalg = *mechmap->sec_signmech;
+
+		if (dsignalg)
+			*dsignalg = *mechmap->sec_dsignmech;
+
+		return true;
+
+	case OAEP:
+		if (mptr->pParameter == NULL ||
+		    mptr->ulParameterLen != sizeof(*oaep)) {
+			os_log_debug(logsys, "Error: OAEP parameter invalid "
+				     "(pParameter = %p, len = %d)",
+				     mptr->pParameter,
+				     (int) mptr->ulParameterLen);
+			return false;
+		}
+
+		oaep = (CK_RSA_PKCS_OAEP_PARAMS_PTR) mptr->pParameter;
+
+		/*
+		 * We don't support a "source" feature at all, and that
+		 * doesn't seem to be used by anyone.  So we can accept
+		 * two things.  A "source" of 0, or a "source" of
+		 * CKZ_DATA_SPECIFIED with source ptr of NULL and length
+		 * of 0.
+		 */
+
+		if (oaep->source != 0 && oaep->source != CKZ_DATA_SPECIFIED) {
+			os_log_debug(logsys, "Error: invalid OAEP source: %#x",
+				     (unsigned int) oaep->source);
+			return false;
+		}
+
+		if (oaep->source == CKZ_DATA_SPECIFIED &&
+		    (oaep->pSourceData != NULL || oaep->ulSourceDataLen != 0)) {
+			os_log_debug(logsys, "Error: invalid OAEP source "
+				     "data specified (%p, %d)",
+				     oaep->pSourceData,
+				     (int) oaep->ulSourceDataLen);
+			return false;
+		}
+
+		/*
+		 * Find the appropriate mechanism to return that matches
+		 * the MGF and the hash algorithm.
+		 */
+
+		for (i = 0; i < keychain_param_map_size; i++) {
+			if (mptr->mechanism ==
+					keychain_param_map[i].base_type &&
+			    oaep->hashAlg == keychain_param_map[i].hash_alg &&
+			    oaep->mgf == keychain_param_map[i].mgf)
+				goto found;
+		}
+
+		os_log_debug(logsys, "Error: No valid mapping for OAEP "
+			     "parameters: hashAlg = %#x, mgf = %#x",
+			     (unsigned int) oaep->hashAlg,
+			     (unsigned int) oaep->mgf);
+
+		return false;
+
+	case PSS:
+		/*
+		 * Slightly easier; make sure the parameter structure
+		 * is the right size, then just check for matching
+		 * parameters
+		 */
+
+		if (mptr->pParameter == NULL || 
+		    mptr->ulParameterLen != sizeof(*pss)) {
+			os_log_debug(logsys, "Error: PSS parameter invalid "
+				     "(pParameter = %p, len = %d)",
+				     mptr->pParameter,
+				     (int) mptr->ulParameterLen);
+			return false;
+		}
+
+		pss = (CK_RSA_PKCS_PSS_PARAMS_PTR) mptr->pParameter;
+
+		for (i = 0; i < keychain_param_map_size; i++) {
+			if (mptr->mechanism ==
+					keychain_param_map[i].base_type &&
+			    pss->hashAlg == keychain_param_map[i].hash_alg &&
+			    pss->mgf == keychain_param_map[i].mgf &&
+			    pss->sLen == keychain_param_map[i].slen)
+				goto found;
+		}
+
+		os_log_debug(logsys, "Error: No valid mapping for PSS "
+			     "parameters: hashAlg = %#x, mgf = %#x, slen = %d",
+			     (unsigned int) pss->hashAlg,
+			     (unsigned int) pss->mgf, (int) pss->sLen);
+
+		return false;
+	}
+
+found:
+	if (encalg)
+		*encalg = *keychain_param_map[i].encalg;
+
+	if (signalg)
+		*signalg = *keychain_param_map[i].signalg;
+
+	if (dsignalg)
+		*dsignalg = *keychain_param_map[i].dsignalg;
 
 	return true;
 }

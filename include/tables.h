@@ -6,17 +6,23 @@
  * from Cryptoki and the Security framework
  */
 
+enum mech_params { NONE, OAEP, PSS };
+
 struct mechanism_map {
 	/*
 	 * Cryptoki information.
 	 *
 	 * The key usage flags indicates all possible things we support, but
 	 * we don't necessarily support that for each key.
+	 *
+	 * "mech_params" is the type of parameters this mechanism takes.
 	 */
 	CK_MECHANISM_TYPE	cki_mech;	/* Cryptoki mechanism name */
 	CK_ULONG		min_keylen;	/* Minimum key length */
 	CK_ULONG		max_keylen;	/* Maximum key length */
 	CK_FLAGS		usage_flags;	/* Key usage flags */
+	enum mech_params	parameters;	/* Mechanism parameters  */
+
 	/*
 	 * Security framework values
 	 *
@@ -47,28 +53,26 @@ struct mechanism_map {
 	bool			blocksize_out;	/* Is block size output? */
 };
 
-extern struct mechanism_map keychain_mechmap[];
-extern unsigned int keychain_mechmap_size;
+extern const struct mechanism_map keychain_mechmap[];
+extern const unsigned int keychain_mechmap_size;
 
 /*
  * Table used for mapping beween Cryptoki algorithms/parameters
  * and Apple Security constants.
  */
 
-enum alg_family { OAEP, PSS };
-
 struct param_map {
 	CK_MECHANISM_TYPE	base_type;	/* Base mechanism type */
 	CK_MECHANISM_TYPE	hash_alg;	/* Hash algorithm used */
 	CK_RSA_PKCS_MGF_TYPE	mgf;		/* Message Gen Function used */
 	CK_ULONG		slen;		/* Salt length (PSS) */
-	enum alg_family		family;		/* Algorithm family */
-	const SecKeyAlgorithm	*alg;		/* Security algorithm type */
-	const SecKeyAlgorithm	*dalg;		/* Digest algorithm type */
+	const SecKeyAlgorithm	*encalg;	/* Encryption algorithm type */
+	const SecKeyAlgorithm	*signalg;	/* Signature algorithm type */
+	const SecKeyAlgorithm	*dsignalg;	/* Digest signature algorithm */
 };
 
-extern struct param_map keychain_param_map[];
-extern unsigned int keychain_param_map_size;
+extern const struct param_map keychain_param_map[];
+extern const unsigned int keychain_param_map_size;
 
 /*
  * Table used for mapping between Cryptoki key types and Security
@@ -85,4 +89,4 @@ struct keymap {
 	const CFStringRef *sec_keytype;	/* Security constant for key type */
 };
 
-extern struct keymap keytype_map[];
+extern const struct keymap keytype_map[];
