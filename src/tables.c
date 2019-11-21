@@ -8,49 +8,103 @@
 #include "tables.h"
 
 const struct mechanism_map keychain_mechmap[] = {
-	{ CKM_RSA_PKCS, 1024, 8192,
+	{
+	  CKM_RSA_PKCS, 1024, 8192,
 	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT|CKF_SIGN|CKF_VERIFY, NONE,
 	  &kSecKeyAlgorithmRSAEncryptionPKCS1,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15Raw,
 	  NULL,		/* Again, special case */
 	  NULL, 0	/* Special case - no digest algoritm specified */,
-	  true },
-	{ CKM_SHA1_RSA_PKCS, 1024, 8192,
+	  true,
+	},
+	{
+	  CKM_SHA1_RSA_PKCS, 1024, 8192,
 	  CKF_HW|CKF_SIGN|CKF_VERIFY, NONE,
 	  NULL,
 	  &kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA1,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1,
-	  &kSecDigestSHA1, 0, true},
-	{ CKM_SHA256_RSA_PKCS, 1024, 8192,
+	  &kSecDigestSHA1, 0, true,
+	},
+	{
+	  CKM_SHA256_RSA_PKCS, 1024, 8192,
 	  CKF_HW|CKF_SIGN|CKF_VERIFY, NONE,
 	  NULL,
 	  &kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256,
-	  &kSecDigestSHA2, 256, true },
-	{ CKM_SHA384_RSA_PKCS, 1024, 8192,
+	  &kSecDigestSHA2, 256, true,
+	},
+	{
+	  CKM_SHA384_RSA_PKCS, 1024, 8192,
 	  CKF_HW|CKF_SIGN|CKF_VERIFY, NONE,
 	  NULL,
 	  &kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA384,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384,
-	  &kSecDigestSHA2, 384, true },
-	{ CKM_SHA512_RSA_PKCS, 1024, 8192,
+	  &kSecDigestSHA2, 384, true,
+	},
+	{
+	  CKM_SHA512_RSA_PKCS, 1024, 8192,
 	  CKF_HW|CKF_SIGN|CKF_VERIFY, NONE,
 	  NULL,
 	  &kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA512,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512,
-	  &kSecDigestSHA2, 512, true },
-	{ CKM_RSA_PKCS_OAEP, 1024, 8192,
+	  &kSecDigestSHA2, 512, true,
+	},
+	{
+	  CKM_RSA_PKCS_OAEP, 1024, 8192,
 	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT, OAEP,
 	  NULL,		/* Filled in by parameter function */
 	  NULL,
 	  NULL,
-	  NULL, 0, true },
-	{ CKM_RSA_PKCS_PSS, 1024, 8192,
+	  NULL, 0, true,
+	},
+	{
+	  CKM_RSA_PKCS_PSS, 1024, 8192,
 	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
 	  NULL,		/* Filled in by parameter function */
 	  NULL,
 	  NULL,
-	  NULL, 0, true },
+	  NULL, 0, true,
+	},
+	{
+	  CKM_SHA1_RSA_PKCS_PSS, 1024, 8192,
+	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
+	  NULL,		/* Filled in by parameter function */
+	  NULL,
+	  NULL,
+	  NULL, 0, true,
+	},
+	{
+	  CKM_SHA224_RSA_PKCS_PSS, 1024, 8192,
+	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
+	  NULL,		/* Filled in by parameter function */
+	  NULL,
+	  NULL,
+	  NULL, 0, true,
+	},
+	{
+	  CKM_SHA256_RSA_PKCS_PSS, 1024, 8192,
+	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
+	  NULL,		/* Filled in by parameter function */
+	  NULL,
+	  NULL,
+	  NULL, 0, true,
+	},
+	{
+	  CKM_SHA384_RSA_PKCS_PSS, 1024, 8192,
+	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
+	  NULL,		/* Filled in by parameter function */
+	  NULL,
+	  NULL,
+	  NULL, 0, true,
+	},
+	{
+	  CKM_SHA512, 1024, 8192,
+	  CKF_HW|CKF_SIGN|CKF_VERIFY, PSS,
+	  NULL,		/* Filled in by parameter function */
+	  NULL,
+	  NULL,
+	  NULL, 0, true,
+	},
 };
 
 const unsigned int keychain_mechmap_size = sizeof(keychain_mechmap) /
@@ -61,7 +115,8 @@ const unsigned int keychain_mechmap_size = sizeof(keychain_mechmap) /
  */
 
 const struct param_map keychain_param_map[] = {
-	{ CKM_RSA_PKCS_OAEP,
+	{
+	  CKM_RSA_PKCS_OAEP,
 	  CKM_SHA_1,
 	  CKG_MGF1_SHA1,
 	  0,
@@ -69,7 +124,8 @@ const struct param_map keychain_param_map[] = {
 	  NULL,
 	  NULL,
 	},
-	{ CKM_RSA_PKCS_OAEP,
+	{
+	  CKM_RSA_PKCS_OAEP,
 	  CKM_SHA224,
 	  CKG_MGF1_SHA224,
 	  0,
@@ -77,7 +133,8 @@ const struct param_map keychain_param_map[] = {
 	  NULL,
 	  NULL,
 	},
-	{ CKM_RSA_PKCS_OAEP,
+	{
+	  CKM_RSA_PKCS_OAEP,
 	  CKM_SHA256,
 	  CKG_MGF1_SHA256,
 	  0,
@@ -85,7 +142,8 @@ const struct param_map keychain_param_map[] = {
 	  NULL,
 	  NULL,
 	},
-	{ CKM_RSA_PKCS_OAEP,
+	{
+	  CKM_RSA_PKCS_OAEP,
 	  CKM_SHA384,
 	  CKG_MGF1_SHA384,
 	  0,
@@ -93,7 +151,8 @@ const struct param_map keychain_param_map[] = {
 	  NULL,
 	  NULL,
 	},
-	{ CKM_RSA_PKCS_OAEP,
+	{
+	  CKM_RSA_PKCS_OAEP,
 	  CKM_SHA512,
 	  CKG_MGF1_SHA512,
 	  0,
@@ -101,7 +160,53 @@ const struct param_map keychain_param_map[] = {
 	  NULL,
 	  NULL,
 	},
-	{ CKM_RSA_PKCS_PSS,
+	{
+	  CKM_RSA_PKCS_PSS,
+	  CKM_SHA_1,
+	  CKG_MGF1_SHA1,
+	  20,
+	  NULL,
+	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA1,
+	  NULL,
+	},
+	{
+	  CKM_RSA_PKCS_PSS,
+	  CKM_SHA224,
+	  CKG_MGF1_SHA224,
+	  28,
+	  NULL,
+	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA224,
+	  NULL,
+	},
+	{
+	  CKM_RSA_PKCS_PSS,
+	  CKM_SHA256,
+	  CKG_MGF1_SHA256,
+	  32,
+	  NULL,
+	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA256,
+	  NULL,
+	},
+	{
+	  CKM_RSA_PKCS_PSS,
+	  CKM_SHA384,
+	  CKG_MGF1_SHA384,
+	  48,
+	  NULL,
+	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA384,
+	  NULL,
+	},
+	{
+	  CKM_RSA_PKCS_PSS,
+	  CKM_SHA512,
+	  CKG_MGF1_SHA512,
+	  64,
+	  NULL,
+	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA512,
+	  NULL,
+	},
+	{
+	  CKM_SHA1_RSA_PKCS_PSS,
 	  CKM_SHA_1,
 	  CKG_MGF1_SHA1,
 	  20,
@@ -109,7 +214,8 @@ const struct param_map keychain_param_map[] = {
 	  &kSecKeyAlgorithmRSASignatureMessagePSSSHA1,
 	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA1,
 	},
-	{ CKM_RSA_PKCS_PSS,
+	{
+	  CKM_SHA224_RSA_PKCS_PSS,
 	  CKM_SHA224,
 	  CKG_MGF1_SHA224,
 	  28,
@@ -117,7 +223,8 @@ const struct param_map keychain_param_map[] = {
 	  &kSecKeyAlgorithmRSASignatureMessagePSSSHA224,
 	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA224,
 	},
-	{ CKM_RSA_PKCS_PSS,
+	{
+	  CKM_SHA256_RSA_PKCS_PSS,
 	  CKM_SHA256,
 	  CKG_MGF1_SHA256,
 	  32,
@@ -125,7 +232,8 @@ const struct param_map keychain_param_map[] = {
 	  &kSecKeyAlgorithmRSASignatureMessagePSSSHA256,
 	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA256,
 	},
-	{ CKM_RSA_PKCS_PSS,
+	{
+	  CKM_SHA384_RSA_PKCS_PSS,
 	  CKM_SHA384,
 	  CKG_MGF1_SHA384,
 	  48,
@@ -133,7 +241,8 @@ const struct param_map keychain_param_map[] = {
 	  &kSecKeyAlgorithmRSASignatureMessagePSSSHA384,
 	  &kSecKeyAlgorithmRSASignatureDigestPSSSHA384,
 	},
-	{ CKM_RSA_PKCS_PSS,
+	{
+	  CKM_SHA512_RSA_PKCS_PSS,
 	  CKM_SHA512,
 	  CKG_MGF1_SHA512,
 	  64,
