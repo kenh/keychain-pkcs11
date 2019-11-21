@@ -1668,7 +1668,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (! id_list[se->obj_list[key].id_index].privcandecrypt) {
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
-		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+		RET(C_DecryptInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
 	}
 
 	/*
