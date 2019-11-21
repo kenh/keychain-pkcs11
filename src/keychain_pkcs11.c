@@ -191,7 +191,7 @@ static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
 static const struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
 static bool mech_param_validate(CK_MECHANISM_PTR, const struct mechanism_map *,
 				SecKeyAlgorithm *, SecKeyAlgorithm *,
-				SecKeyAlgorithm *);
+				SecKeyAlgorithm *, CFStringRef *, CFIndex *);
 
 /*
  * Our object list and the functions to handle them
@@ -1507,7 +1507,8 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 * then we need to return an error.
 	 */
 
-	if (! mech_param_validate(mech, mm, &se->enc_alg, NULL, NULL)) {
+	if (! mech_param_validate(mech, mm, &se->enc_alg, NULL, NULL,
+				  NULL, NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -1682,7 +1683,8 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
-	if (! mech_param_validate(mech, mm, &se->dec_alg, NULL, NULL)) {
+	if (! mech_param_validate(mech, mm, &se->dec_alg, NULL, NULL,
+				  NULL, NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -1821,7 +1823,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		 CK_OBJECT_HANDLE object)
 {
 	struct session *se;
-	int i;
+	const struct mechanism_map *mm;
+	CK_RV rv = CKR_OK;
 
 	FUNCINITCHK(C_SignInit);
 
@@ -1836,15 +1839,12 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	object--;
 
 	if (object >= se->obj_list_count) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_SignInit, CKR_KEY_HANDLE_INVALID);
+		rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
 	}
 
 	if (! id_list[se->obj_list[object].id_index].privcansign) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_SignInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
 	}
 
 	/*
@@ -1853,39 +1853,48 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 */
 
 	if (se->obj_list[object].class != CKO_PRIVATE_KEY) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_SignInit, CKR_KEY_TYPE_INCONSISTENT);
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
+	}
+
+	/*
+	 * See the comments in C_EncryptInit() for what is going on here
+	 */
+
+	mm = get_mechmap(mech->mechanism);
+
+	if (! mm || (mm->usage_flags & CKF_SIGN) == 0) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
+	}
+
+	if (! mech_param_validate(mech, mm, NULL, &se->alg, &se->dalg,
+				  &se->digest, &se->diglen)) {
+		rv = CKR_MECHANISM_PARAM_INVALID;
+		goto out;
 	}
 
 	/*
 	 * Map our mechanism onto what we need for signing
 	 */
 
-	for (i = 0; i < keychain_mechmap_size; i++) {
-		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->key)
-				CFRelease(se->key);
-			se->key =
-				id_list[se->obj_list[object].id_index].privkey;
-			CFRetain(se->key);
-			se->alg = *keychain_mechmap[i].sec_signmech;
-			se->dalg = *keychain_mechmap[i].sec_dsignmech;
-			se->digest = *keychain_mechmap[i].sec_digest;
-			se->diglen = keychain_mechmap[i].sec_digestlen;
-			if (keychain_mechmap[i].blocksize_out) {
-				se->outsize = SecKeyGetBlockSize(se->key);
-			} else {
-				se->outsize = 0;
-			}
+	if (se->key)
+		CFRelease(se->key);
 
-			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
-			RET(C_SignInit, CKR_OK);
-		}
+	se->key = id_list[se->obj_list[object].id_index].privkey;
+	CFRetain(se->key);
+
+	if (mm->blocksize_out) {
+		se->outsize = SecKeyGetBlockSize(se->key);
+	} else {
+		se->outsize = 0;
 	}
 
-	RET(C_SignInit, CKR_MECHANISM_INVALID);
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
+	RET(C_SignInit, rv);
 }
 
 /*
@@ -2030,6 +2039,23 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * There are some signature operations that cannot take a
+	 * multi-part operation.  The big one is CKM_RSA_PKCS, but
+	 * there are others (we don't implement those others at this
+	 * time).
+	 *
+	 * For these, there is no "digest" algorithm available.  So if
+	 * the dalg is set to NULL, return an error.  CKR_DATA_LEN_RANGE
+	 * is the best one I can think of right now.
+	 */
+
+	if (!se->dalg) {
+		rv = CKR_DATA_LEN_RANGE;
+		transform_end(se);
+		goto out;
+	}
 
 	/*
 	 * If we don't have a pending signature operation, then
@@ -2348,7 +2374,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		   CK_OBJECT_HANDLE key)
 {
 	struct session *se;
-	int i;
+	const struct mechanism_map *mm;
+	CK_RV rv = CKR_OK;
 
 	FUNCINITCHK(C_VerifyInit);
 
@@ -2377,33 +2404,47 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->obj_list[key].class != CKO_PUBLIC_KEY) {
 		UNLOCK_MUTEX(se->mutex);
 		UNLOCK_MUTEX(id_mutex);
-		RET(C_SignInit, CKR_KEY_TYPE_INCONSISTENT);
+		RET(C_VerifyInit, CKR_KEY_TYPE_INCONSISTENT);
 	}
 
 	/*
-	 * Map our mechanism onto what we need for verification
+	 * See the comments in C_EncryptInit() for what is going on here
 	 */
 
-	for (i = 0; i < keychain_mechmap_size; i++) {
-		if (mech->mechanism == keychain_mechmap[i].cki_mech) {
-			if (se->key)
-				CFRelease(se->key);
-			se->key = id_list[se->obj_list[key].id_index].pubkey;
-			CFRetain(se->key);
-			se->alg = *keychain_mechmap[i].sec_signmech;
-			se->dalg = *keychain_mechmap[i].sec_dsignmech;
-			se->digest = *keychain_mechmap[i].sec_digest;
-			se->diglen = keychain_mechmap[i].sec_digestlen;
-			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
-			RET(C_VerifyInit, CKR_OK);
-		}
+	mm = get_mechmap(mech->mechanism);
+
+	if (! mm || (mm->usage_flags & CKF_VERIFY) == 0) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
 	}
 
+	if (! mech_param_validate(mech, mm, NULL, &se->alg, &se->dalg,
+				  &se->digest, &se->diglen)) {
+		rv = CKR_MECHANISM_PARAM_INVALID;
+		goto out;
+	}
+
+	/*
+	 * Map our mechanism onto what we need for signing
+	 */
+
+	if (se->key)
+		CFRelease(se->key);
+
+	se->key = id_list[se->obj_list[key].id_index].pubkey;
+	CFRetain(se->key);
+
+	if (mm->blocksize_out) {
+		se->outsize = SecKeyGetBlockSize(se->key);
+	} else {
+		se->outsize = 0;
+	}
+
+out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
-	RET(C_VerifyInit, CKR_MECHANISM_INVALID);
+	RET(C_VerifyInit, rv);
 }
 
 CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
@@ -2467,6 +2508,20 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		     (int) session, indata, (int) indatalen);
 
 	CHECKSESSION(session, se);
+
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * Make sure we can actually use the Update function; see
+	 * C_SignUpdate for an explanation.
+	 */
+
+	if (!se->dalg) {
+		rv = CKR_DATA_LEN_RANGE;
+		transform_end(se);
+		goto out;
+	}
 
 	if (! se->trans) {
 
@@ -4876,7 +4931,8 @@ get_mechmap(CK_MECHANISM_TYPE mechtype)
 static bool
 mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 		    SecKeyAlgorithm *encalg, SecKeyAlgorithm *signalg,
-		    SecKeyAlgorithm *dsignalg)
+		    SecKeyAlgorithm *dsignalg, CFStringRef *digest,
+		    CFIndex *digestlen)
 {
 	CK_RSA_PKCS_OAEP_PARAMS_PTR oaep;
 	CK_RSA_PKCS_PSS_PARAMS_PTR pss;
@@ -4904,13 +4960,23 @@ mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 		}
 
 		if (encalg)
-			*encalg = *mechmap->sec_encmech;
+			*encalg = mechmap->sec_encmech ?
+					*mechmap->sec_encmech : NULL;
 
 		if (signalg)
-			*signalg = *mechmap->sec_signmech;
+			*signalg = mechmap->sec_signmech ?
+					*mechmap->sec_signmech : NULL;
 
 		if (dsignalg)
-			*dsignalg = *mechmap->sec_dsignmech;
+			*dsignalg = mechmap->sec_dsignmech ?
+					*mechmap->sec_dsignmech : NULL;
+
+		if (digest)
+			*digest = mechmap->sec_digest ?
+					*mechmap->sec_digest : NULL;
+
+		if (digestlen)
+			*digestlen = mechmap->sec_digestlen;
 
 		return true;
 
@@ -5006,13 +5072,23 @@ mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 
 found:
 	if (encalg)
-		*encalg = *keychain_param_map[i].encalg;
+		*encalg = keychain_param_map[i].encalg ?
+					*keychain_param_map[i].encalg : NULL;
 
 	if (signalg)
-		*signalg = *keychain_param_map[i].signalg;
+		*signalg = keychain_param_map[i].signalg ?
+					*keychain_param_map[i].signalg : NULL;
 
 	if (dsignalg)
-		*dsignalg = *keychain_param_map[i].dsignalg;
+		*dsignalg = keychain_param_map[i].dsignalg ?
+					*keychain_param_map[i].dsignalg : NULL;
+
+	if (digest)
+		*digest = keychain_param_map[i].digest ?
+					*keychain_param_map[i].digest : NULL;
+
+	if (digestlen)
+		*digestlen = keychain_param_map[i].digestlen;
 
 	return true;
 }

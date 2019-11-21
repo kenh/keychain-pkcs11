@@ -69,6 +69,8 @@ struct param_map {
 	const SecKeyAlgorithm	*encalg;	/* Encryption algorithm type */
 	const SecKeyAlgorithm	*signalg;	/* Signature algorithm type */
 	const SecKeyAlgorithm	*dsignalg;	/* Digest signature algorithm */
+	const CFStringRef	*digest;	/* Digest algorithm */
+	unsigned int		digestlen;	/* Digest length */
 };
 
 extern const struct param_map keychain_param_map[];
