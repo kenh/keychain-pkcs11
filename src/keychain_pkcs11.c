@@ -2680,7 +2680,7 @@ out:
 	UNLOCK_MUTEX(id_mutex);
 	CFRelease(sigdata);
 
-	RET(C_SignFinal, rv);
+	RET(C_VerifyFinal, rv);
 }
 NOTSUPPORTED(C_VerifyRecoverInit, (CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech, CK_OBJECT_HANDLE key))
 NOTSUPPORTED(C_VerifyRecover, (CK_SESSION_HANDLE session, CK_BYTE_PTR sig, CK_ULONG siglen, CK_BYTE_PTR outdata, CK_ULONG_PTR outdatalen))
