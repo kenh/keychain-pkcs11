@@ -4,6 +4,25 @@
  *
  * Users of this header file will need to include the correct headers
  * from Cryptoki and the Security framework
+ *
+ * A larger explanation about "sign algorithms" vs "digest sign algorithms":
+ *
+ * The Apple Security framework currently (as of this writing) doesn't
+ * have a way of doing a multi-part signature operation (where data is
+ * digested in chunks and then signed/verified by a private or public key).
+ * So all of the signature algorithms have TWO algorithms - one designed to
+ * take raw data, digest it and sign it as a single operation, and one
+ * designed to take an already-generated digest and just sign that data.
+ * The algorithms that take raw data to be signed all have "Message"
+ * in their name and the ones that take an already-generated digest
+ * have "Digest" in their name.  So we have to know both algorithms
+ * in case the caller decides to use a multi-part signing operation.
+ *
+ * In theory you could use the SecTransform API to do a multi-part
+ * signature operation, but aside from the general pain of the SecTransform
+ * API (multi-part operations require creating a bound CFStream pair
+ * and running the SecTransform operation in a separate thread), but
+ * that doesn't work currently with keys on smartcards.
  */
 
 enum mech_params { NONE, OAEP, PSS };
@@ -26,16 +45,19 @@ struct mechanism_map {
 	/*
 	 * Security framework values
 	 *
-	 * The references to the key and digest algoritms are pointers
+	 * The references to the encryption algorithms are pointers
 	 * to the constants, as we can't have the actual values of the
 	 * variables resolved at compile/link time.  That just means
 	 * we need to dereference those when we use them.
 	 *
-	 * The digest is used when you have to use the SecTransform API
-	 * and you are using a mechanism that specifies a particular
-	 * digest.  The digestlen is used for SHA2 mechanisms that have
-	 * varying digest lengths; if you don't need that, just set it
-	 * to 0.
+	 * We USED to use the SecTransform API to perform digest functions
+	 * but it turns out that isn't required and the CommonCrypto
+	 * routines are quicker and easier.  There is a specific function
+	 * to call for each different digest, so to make things easier
+	 * we have abstracted all of that in the ccglue functions and you
+	 * pass in the mechanism type.  Rather than use Security framework
+	 * values to represent the digest, I am using the PKCS#11 types
+	 * to represent digest types.
 	 *
 	 * "blocksize_out" is true IF the output size of the mechanism is
 	 * the same as the block size returned by SecKeyGetBlockSize();
@@ -48,8 +70,7 @@ struct mechanism_map {
 	const SecKeyAlgorithm	*sec_encmech;	/* Security mech for enc */
 	const SecKeyAlgorithm	*sec_signmech;	/* Security mech for sign */
 	const SecKeyAlgorithm	*sec_dsignmech;	/* Mech for sign, take dgst */
-	const CFStringRef	*sec_digest;	/* Digest type used */
-	unsigned int		sec_digestlen;	/* Digest length */
+	CK_MECHANISM_TYPE	sec_digest;	/* Digest type used */
 	bool			blocksize_out;	/* Is block size output? */
 };
 
@@ -69,8 +90,6 @@ struct param_map {
 	const SecKeyAlgorithm	*encalg;	/* Encryption algorithm type */
 	const SecKeyAlgorithm	*signalg;	/* Signature algorithm type */
 	const SecKeyAlgorithm	*dsignalg;	/* Digest signature algorithm */
-	const CFStringRef	*digest;	/* Digest algorithm */
-	unsigned int		digestlen;	/* Digest length */
 };
 
 extern const struct param_map keychain_param_map[];

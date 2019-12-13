@@ -17,6 +17,7 @@
 #include "keychain_pkcs11.h"
 #include "localauth.h"
 #include "certutil.h"
+#include "ccglue.h"
 #include "debug.h"
 #include "tables.h"
 #include "config.h"
@@ -268,12 +269,8 @@ struct session {
 	SecKeyAlgorithm dec_alg;		/* Decryption algorithm */
 	SecKeyRef	dec_key;		/* Decryption key */
 	size_t		dec_size;		/* Max size of dec, 0 unknown */
-	SecTransformRef trans;			/* Crypto transform handle */
-	CFReadStreamRef rstream;		/* Read stram for transform */
-	CFWriteStreamRef wstream;		/* Write stream for transform */
-	_Atomic bool	transerr;		/* Was there a transform err? */
-	CFDataRef	transout;		/* Transform output */
-	dispatch_semaphore_t sema;		/* Signaling semaphore */
+	CK_MECHANISM_TYPE hash_alg;		/* Hash algorithm */
+	md_context	mdc;			/* Message digest context */
 };
 
 static struct session **sess_list = NULL;	/* Yes, array of pointers */
@@ -281,8 +278,6 @@ static unsigned int sess_list_count = 0;
 static unsigned int sess_list_size = 0;
 static void sess_free(struct session *);
 static void sess_list_free(void);
-static void transform_task(void *);
-static void transform_end(struct session *);
 
 /*
  * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
@@ -1031,12 +1026,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->key = NULL;
 	sess->enc_key = NULL;
 	sess->dec_key = NULL;
-	sess->trans = NULL;
-	sess->rstream = NULL;
-	sess->wstream = NULL;
-	sess->transerr = false;
-	sess->transout = NULL;
-	sess->sema = NULL;
+	sess->mdc = NULL;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -2043,8 +2033,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	/*
 	 * There are some signature operations that cannot take a
 	 * multi-part operation.  The big one is CKM_RSA_PKCS, but
-	 * there are others (we don't implement those others at this
-	 * time).
+	 * there are others.
 	 *
 	 * For these, there is no "digest" algorithm available.  So if
 	 * the dalg is set to NULL, return an error.  CKR_DATA_LEN_RANGE
@@ -2061,206 +2050,37 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	 * If we don't have a pending signature operation, then
 	 * start that now.
 	 *
-	 * The SecTransform API is relatively generic and in the normal
-	 * use case you feed in your input blob via a CFDataRef using
-	 * the kSecTransformInputAttributeName attribute.  But we can't do
-	 * that because that will only permit one input chunk and this
-	 * API requires we support an indefinite number.
-	 *
-	 * It turns out that INSTEAD of setting that attribute to a
-	 * CFDataRef, you can also set it to a CFReadStreamRef.  Then
-	 * the transform function will use that stream as an input source.
-	 * If you create a "bound pair" of stream objects, you can write
-	 * data to the write stream and the transform function will
-	 * read the corresponding data on the read stream.
-	 *
-	 * Unfortunately, you have to run the transform function in
-	 * another thread, and some simple experiments suggests that
-	 * you lose a lot of performance because of locking in the
-	 * stream library.  But at least the API should be stable for
-	 * a while.
+	 * We USED to use the SecTransform API, but it turns out that
+	 * a relatively normal digest algorithm API is available via
+	 * CommonCrypto.  We use our wrapper on top of CommonCrypto
+	 * so we can be algorithm-agnostic.
 	 */
 
-	if (! se->trans) {
+	if (! se->mdc) {
 		/*
-		 * Sigh.  Curse you Apple, once again.
-		 *
-		 * In a perfect world we'd just use SecSignTransformCreate()
-		 * to create the desired signature transform.  But it turns
-		 * out THAT doesn't work with the "new world" smartcard
-		 * API.  The failure there seems to be that underneath
-		 * the hood the SecSignTransform APIs call the old CSSM
-		 * APIs, and those seem to fail if the key is NOT in a
-		 * Keychain .. and guess what, the new world smartcard
-		 * keys are NOT in any Keychain.
-		 *
-		 * But, there is a solution.  We can use the transform
-		 * API to calculate the DIGEST, and then call the appropriate
-		 * function to encrypt the digest which will result in the
-		 * correct signature.  At least Apple provides crypto
-		 * algorithms designed to take digests so we don't have to
-		 * generate an ASN.1 structure with the right OID in it.
+		 * Because there's not really an API that will let us
+		 * do a multi-part signature operation, we have to calculate
+		 * the digest ourselves then call the appropriate "digest"
+		 * signing function.  SecSignTransformCreate() doesn't work
+		 * when the key is on a smartcard.
 		 */
 
-		se->trans = SecDigestTransformCreate(se->digest,
-						     se->diglen, &err);
-
-		if (! se->trans) {
-			os_log_debug(logsys, "SecDigestTransformCreate "
-				     "failed: %{public}@", err);
-			CFRelease(err);
-			rv = CKR_GENERAL_ERROR;
+		if (! cc_md_init(se->hash_alg, &se->mdc)) {
+			os_log_debug(logsys, "Unable to initialize digest "
+				     "function for %s",
+				     getCKMName(se->hash_alg));
+			rv = CKR_GENERAL_ERROR;		
 			goto out;
 		}
-
-
-		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
-					&se->wstream, 16384);
-		CFWriteStreamOpen(se->wstream);
-		CFReadStreamOpen(se->rstream);
-
-		if (! SecTransformSetAttribute(se->trans,
-					       kSecTransformInputAttributeName,
-					       se->rstream, &err)) {
-			os_log_debug(logsys, "Unable to set input stream for "
-				     "signature transform: %{public}@", err);
-			rv = CKR_GENERAL_ERROR;
-			goto badtrans;
-		}
-
-		se->sema = dispatch_semaphore_create(0);
-		se->transerr = false;
-
-badtrans:
-		if (rv != CKR_OK) {
-			transform_end(se);
-			goto out;
-		}
-
-		dispatch_async_f(dispatch_get_global_queue(
-				  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
-			         se, transform_task);
 	}
 
-	/*
-	 * At this point, either the background task has been started,
-	 * or is already running.  Write the requested data to the write
-	 * stream.  Check for any errors; note that we can get a short
-	 * write, so we need a loop.
-	 */
-
-	if (se->transerr) {
-		os_log_debug(logsys, "Aborting operation since our background"
-			     "thread signaled an error");
-		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
-		transform_end(se);
-		rv = CKR_GENERAL_ERROR;
-		goto out;
-	}
-
-	do {
-		cc = CFWriteStreamWrite(se->wstream, indata + count,
-					indatalen - count);
-
-		if (cc < 0) {
-			err = CFWriteStreamCopyError(se->wstream);
-
-			if (err) {
-				os_log_debug(logsys, "Error writing to "
-					     "transform stream: %{public}@",
-					     err);
-				CFRelease(err);
-			} else {
-				os_log_debug(logsys, "Error writing to "
-					     "transform stream but no "
-					     "error returned");
-			}
-
-			CFWriteStreamClose(se->wstream);
-			se->wstream = NULL;
-
-			dispatch_semaphore_wait(se->sema,
-						DISPATCH_TIME_FOREVER);
-			transform_end(se);
-			rv = CKR_GENERAL_ERROR;
-			goto out;
-		}
-
-		count += cc;
-	} while (count < indatalen);
+	cc_md_update(se->mdc, indata, indatalen);
 
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_SignUpdate, rv);
-}
-
-/*
- * Our thread that does the transform processing.  Signal the semaphore
- * when we are done.
- */
-
-static void
-transform_task(void *context)
-{
-	struct session *se = (struct session *) context;
-	CFErrorRef err = NULL;
-
-	se->transout = SecTransformExecute(se->trans, &err);
-
-	if (! se->transout) {
-		os_log_debug(logsys, "Security transform failed: "
-			     "%{public}@", err);
-		se->transerr = true;
-		CFRelease(err);
-	}
-
-	dispatch_semaphore_signal(se->sema);
-}
-
-/*
- * Clean up everything after a transaction has completed.  The semaphore
- * must be balanced.
- */
-
-static void
-transform_end(struct session *se)
-{
-	if (se->wstream) {
-		CFWriteStreamClose(se->wstream);
-		se->wstream = NULL;
-	}
-
-	if (se->rstream) {
-		CFReadStreamClose(se->rstream);
-		se->rstream = NULL;
-	}
-
-	if (se->trans) {
-		CFRelease(se->trans);
-		se->trans = NULL;
-	}
-
-	if (se->transout) {
-		CFRelease(se->transout);
-		se->transout = NULL;
-	}
-
-	if (se->sema) {
-		dispatch_release(se->sema);
-		se->sema = NULL;
-	}
-
-	/*
-	 * We only call this when the call is successful or has failed;
-	 * in either case, we are done with this operation.  So always
-	 * clean up the key reference as well.
-	 */
-
-	CFRelease(se->key);
-	se->key = NULL;
-	se->outsize = 0;
 }
 
 /*
@@ -4475,7 +4295,9 @@ build_cert_objects(void)
 	for (i = 0; i < cert_list_count; i++) {
 		SecCertificateRef cert = cert_list[i].cert;
 		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
-		CFDataRef hash = NULL;
+		unsigned char *hash = NULL;
+		unsigned int hashlen;
+		md_context mdc;
 		CFStringRef subjstr;
 		char *subjc;
 		unsigned char *objid = NULL;
@@ -4510,7 +4332,13 @@ build_cert_objects(void)
 		ADD_ATTR_SIZE(cert, CKA_VALUE, CFDataGetBytePtr(d),
 			      CFDataGetLength(d));
 		get_certificate_info(d, &serial, &issuer, &subject);
-		hash = get_hash(kSecDigestSHA1, 0, d);
+
+		if (cc_md_init(CKM_SHA_1, &mdc)) {
+			cc_md_update(mdc, CFDataGetBytePtr(d),
+				     CFDataGetLength(d));
+			cc_md_final(mdc, &hash, &hashlen);
+		}
+
 		CFRelease(d);
 
 		if (subject)
@@ -4544,9 +4372,7 @@ build_cert_objects(void)
 				      CFDataGetBytePtr(serial),
 				      CFDataGetLength(serial));
 		if (hash)
-			ADD_ATTR_SIZE(cert, CKA_CERT_SHA1_HASH,
-				      CFDataGetBytePtr(hash),
-				      CFDataGetLength(hash));
+			ADD_ATTR_SIZE(cert, CKA_CERT_SHA1_HASH, hash, hashlen);
 
 		/*
 		 * As far as I can tell, CAs should have these various
@@ -4576,7 +4402,7 @@ build_cert_objects(void)
 		if (serial)
 			CFRelease(serial);
 		if (hash)
-			CFRelease(hash);
+			free(hash);
 	}
 }
 
@@ -5160,6 +4986,19 @@ sess_free(struct session *se)
 
 	if (se->dec_key)
 		CFRelease(se->dec_key);
+
+	if (se->mdc) {
+		/*
+		 * At this point we need to finalize the digest, but
+		 * just discard the results.
+		 */
+
+		unsigned char *digest;
+		unsigned int size;
+
+		cc_md_final(se->mdc, &digest, &size);
+		free(digest);
+	}
 
 	if (se->wstream) {
 		/*

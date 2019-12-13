@@ -24,15 +24,6 @@ extern char *get_common_name(unsigned char *, unsigned int);
 extern bool get_pubkey_info(CFDataRef, CFDataRef *, CFDataRef *);
 
 /*
- * Calculate hash function; first two arguments are passed into
- * SecDigestTransformCreate().
- *
- * Returns CFDataRef on success (must be released) and NULL on failure
- */
-
-extern CFDataRef get_hash(CFTypeRef, CFIndex length, CFDataRef);
-
-/*
  * Return 'true' if the given certificate is a CA
  */
 

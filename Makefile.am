@@ -18,11 +18,13 @@ keychain_pkcs11_la_SOURCES = \
 			src/tables.c \
 			src/localauth.m \
 			src/certutil.c \
+			src/ccglue.c \
 			include/debug.h \
 			include/keychain_pkcs11.h \
 			include/localauth.h \
 			include/tables.h \
 			include/certutil.h \
+			include/ccglue.h \
 			include/mypkcs11.h \
 			include/pkcs11.h \
 			include/pkcs11f.h \

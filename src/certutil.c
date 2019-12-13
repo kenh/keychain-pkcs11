@@ -352,48 +352,6 @@ get_pubkey_info(CFDataRef pubkeydata, CFDataRef *modulus, CFDataRef *exponent)
 }
 
 /*
- * Calculate the specified digest.  Sigh.  This SecTransform API is really
- * more complicated than I would want.
- */
-
-CFDataRef
-get_hash(CFTypeRef digest, CFIndex size, CFDataRef input)
-{
-	SecTransformRef tr;
-	CFErrorRef err = NULL;
-	CFDataRef result = NULL;
-
-	tr = SecDigestTransformCreate(digest, size, &err);
-
-	if (! tr) {
-		os_log_debug(logsys, "SecDigestTransformCreate failed: "
-			     "%{public}@", err);
-		goto out;
-	}
-
-	if (!SecTransformSetAttribute(tr, kSecTransformInputAttributeName,
-				      input, &err)) {
-		os_log_debug(logsys, "SetTransformSetAttribute failed: "
-			     "%{public}@", err);
-		goto out;
-	}
-
-	result = SecTransformExecute(tr, &err);
-
-	if (! result)
-		os_log_debug(logsys, "SecTransformExecute failed: %{public}@",
-			     err);
-
-out:
-	if (err)
-		CFRelease(err);
-	if (tr)
-		CFRelease(tr);
-
-	return result;
-}
-
-/*
  * Return 'true' if the given certificate is a CA.
  *
  * The following things have to be true for a cert to be a CA:
