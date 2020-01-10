@@ -204,9 +204,10 @@ static bool mech_param_validate(CK_MECHANISM_PTR, const struct mechanism_map *,
  * Private keys (CKO_PRIVATE_KEY).
  *
  * The general rule is the CKA_ID attribute for any of those should all
- * match for a given identity.  I implemented this so the CKA_ID
- * is a CK_ULONG that is an index into our identity array.  This is
- * arbitrary; we could just match on any byte string.
+ * match for a given identity.  Previously I just made this as a CK_ULONG
+ * corresponding to the identity array index but I got complaints; now it
+ * calls get_index_bytes and returns the shortest number of bytes that
+ * correspond to the object index.
  *
  * Previously I had implemented each object list as part of a session, but
  * really the object space is per-token, so I changed the implementation to
@@ -2015,10 +2016,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		   CK_ULONG indatalen)
 {
 	struct session *se;
-	CFErrorRef err = NULL;
 	CK_RV rv = CKR_OK;
-	unsigned int count = 0;
-	CFIndex cc;
 
 	FUNCINITCHK(C_SignUpdate);
 
@@ -2042,7 +2040,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	if (!se->dalg) {
 		rv = CKR_DATA_LEN_RANGE;
-		transform_end(se);
 		goto out;
 	}
 
