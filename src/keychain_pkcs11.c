@@ -238,6 +238,40 @@ static unsigned int id_obj_count = 0;		/* Identity object list count */
 static unsigned int id_obj_size = 0;		/* Size of identity obj_list */
 
 /*
+ * Our session "state" for operations that span multiple functions.
+ * Basic states are:
+ *
+ * NONE		- No function pending
+ * X_INIT	- Function (Sign, Encrypt, etc) initialized.
+ * X_UPDATE	- We've called the appropriate "update" function
+ *		  like C_SignUpdate().
+ *
+ * In the above list, 'X' is one of E (encrypt), D (decrypt),
+ * S (sign), or V (verify).
+
+ * We're only allowed one pending operation per session.  So the way
+ * this works is when you call a function like C_SignInit(), you
+ * have to be in the NONE state, and you move into INIT state.
+ *
+ * If you call the non-update function (e.g., C_Sign()) you have
+ * to be in INIT state and (assuming successful completion) you move
+ * back into NONE (because the operation is complete).
+ *
+ * If you call the update function (C_SignUpdate()) you have to either
+ * be in INIT or UPDATE.  You move to UPDATE.
+ *
+ * For the finalize function (C_SignFinal()) you have to be in UPDATE,
+ * and assuming successful completion you move to NONE.
+ *
+ * In theory this should exclude FindObject operations when a crypto
+ * operation is in progress, but we don't have that technical limitation
+ * so we don't enforce that.
+ */
+
+enum s_state { NO_PENDING, E_INIT, E_UPDATE, D_INIT, D_UPDATE, S_INIT,
+               S_UPDATE, V_INIT, V_UPDATE };
+
+/*
  * Our session information.  Anything that modifies a session will need to
  * lock that particular session.  We keep an array of pointers to sessions
  * available; if we need more then reallocate the array.
@@ -258,18 +292,13 @@ struct session {
 	unsigned int	obj_search_index;	/* Current search index */
 	CK_ATTRIBUTE_PTR search_attrs;		/* Search attributes */
 	unsigned int	search_attrs_count;	/* Search attribute count */
+	enum s_state	state;			/* Session operation state */
 	SecKeyRef	key;			/* Key for in-progress op */
 	size_t		outsize;		/* Op output size, 0 unknown */
 	SecKeyAlgorithm	alg;			/* Algorithm for in-prog op */
 	SecKeyAlgorithm dalg;			/* Algorithm, takes digest */
 	CFStringRef	digest;			/* Digest algorithm */
 	CFIndex		diglen;			/* Digest algorithm length */
-	SecKeyAlgorithm enc_alg;		/* Encryption algorithm */
-	SecKeyRef	enc_key;		/* Encryption key */
-	size_t		enc_size;		/* Size of enc, 0 is unknown */
-	SecKeyAlgorithm dec_alg;		/* Decryption algorithm */
-	SecKeyRef	dec_key;		/* Decryption key */
-	size_t		dec_size;		/* Max size of dec, 0 unknown */
 	CK_MECHANISM_TYPE hash_alg;		/* Hash algorithm */
 	md_context	mdc;			/* Message digest context */
 };
@@ -1024,9 +1053,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	sess->slot_id = slot_id;
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
+	sess->state = NO_PENDING;
 	sess->key = NULL;
-	sess->enc_key = NULL;
-	sess->dec_key = NULL;
 	sess->mdc = NULL;
 
 	LOCK_MUTEX(sess_mutex);
@@ -1460,6 +1488,12 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
+	if (se->state != NO_PENDING) {
+		os_log_debug(logsys, "Crypto operation already pending");
+		rv = CKR_OPERATION_ACTIVE;
+		goto out;
+	}
+
 	/*
 	 * Right now we assume only a public key can perform encryption
 	 */
@@ -1498,22 +1532,24 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 * then we need to return an error.
 	 */
 
-	if (! mech_param_validate(mech, mm, &se->enc_alg, NULL, NULL,
+	if (! mech_param_validate(mech, mm, &se->alg, NULL, NULL,
 				  NULL, NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
 
-	if (se->enc_key)
-		CFRelease(se->enc_key);
+	if (se->key)
+		CFRelease(se->key);
 
-	se->enc_key = id_list[se->obj_list[object].id_index].pubkey;
-	CFRetain(se->enc_key);
+	se->key = id_list[se->obj_list[object].id_index].pubkey;
+	CFRetain(se->key);
 
 	if (mm->blocksize_out)
-		se->enc_size = SecKeyGetBlockSize(se->enc_key);
+		se->outsize = SecKeyGetBlockSize(se->key);
 	else
-		se->enc_size = 0;
+		se->outsize = 0;
+
+	se->state = E_INIT;
 
 out:
 	UNLOCK_MUTEX(se->mutex);
@@ -1542,30 +1578,40 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		     (int) indatalen, outdata, (int) *outdatalen);
 
 	/*
+	 * Make sure we have an in-progress operation
+	 */
+
+	if (se->state != E_INIT) {
+		os_log_debug(logsys, "Encryption operation not initialized");
+		UNLOCK_MUTEX(se->mutex);
+		RET(C_Encrypt, CKR_OPERATION_NOT_INITIALIZED);
+	}
+
+	/*
 	 * If we know our mechanism output size, check first to see if the
 	 * output buffer is big enough.  Also, short-circuit this test if
 	 * outdata is NULL.
 	 */
 
 	if (! outdata) {
-		if (! se->enc_size) {
+		if (! se->outsize) {
 			/* Hmm, what to do here?  No idea! */
 			UNLOCK_MUTEX(se->mutex);
 			UNLOCK_MUTEX(id_mutex);
 			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
 		}
-		*outdatalen = se->enc_size;
+		*outdatalen = se->outsize;
 		os_log_debug(logsys, "outdata is NULL, returning an output "
-			     "size of %d", (int) se->enc_size);
+			     "size of %d", (int) se->outsize);
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Encrypt, CKR_OK);
 	}
 
-	if (se->enc_size && se->enc_size > *outdatalen) {
+	if (se->outsize && se->outsize > *outdatalen) {
 		os_log_debug(logsys, "Output size is %d, but our output "
-			     "buffer is %d", (int) se->enc_size,
+			     "buffer is %d", (int) se->outsize,
 			     (int) *outdatalen);
-		*outdatalen = se->enc_size;
+		*outdatalen = se->outsize;
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
 	}
@@ -1573,7 +1619,7 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 
-	outref = SecKeyCreateEncryptedData(se->enc_key, se->enc_alg, inref,
+	outref = SecKeyCreateEncryptedData(se->key, se->alg, inref,
 					   &err);
 
 	CFRelease(inref);
@@ -1583,9 +1629,10 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     "%{public}@ (%ld)", err,
 			     (long) CFErrorGetCode(err));
 		CFRelease(err);
-		CFRelease(se->enc_key);
-		se->enc_key = NULL;
-		se->enc_size = 0;
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
+		se->state = NO_PENDING;
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Encrypt, CKR_GENERAL_ERROR);
 	}
@@ -1598,9 +1645,10 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		/*
 		 * If the encryption was successful, release our key reference
 		 */
-		CFRelease(se->enc_key);
-		se->enc_key = NULL;
-		se->enc_size = 0;
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
+		se->state = NO_PENDING;
 	}
 
 	*outdatalen = CFDataGetLength(outref);
@@ -1630,6 +1678,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (! mech) {
@@ -1643,8 +1692,18 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	key--;
 
 	if (key >= se->obj_list_count) {
-		UNLOCK_MUTEX(se->mutex);
-		RET(C_DecryptInit, CKR_KEY_HANDLE_INVALID);
+		rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+
+	/*
+	 * Make sure no other operations are pending
+	 */
+
+	if (se->state != NO_PENDING) {
+		os_log_debug(logsys, "Crypto operation already pending");
+		rv = CKR_OPERATION_ACTIVE;
+		goto out;
 	}
 
 	/*
@@ -1652,15 +1711,13 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 */
 
 	if (se->obj_list[key].class != CKO_PRIVATE_KEY) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_DecryptInit, CKR_KEY_TYPE_INCONSISTENT);
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
 	}
 
 	if (! id_list[se->obj_list[key].id_index].privcandecrypt) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_DecryptInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
+		goto out;
 	}
 
 	/*
@@ -1674,22 +1731,24 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
-	if (! mech_param_validate(mech, mm, &se->dec_alg, NULL, NULL,
+	if (! mech_param_validate(mech, mm, &se->alg, NULL, NULL,
 				  NULL, NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
 
-	if (se->dec_key)
-		CFRelease(se->dec_key);
+	if (se->key)
+		CFRelease(se->key);
 
-	se->dec_key = id_list[se->obj_list[key].id_index].privkey;
-	CFRetain(se->dec_key);
+	se->key = id_list[se->obj_list[key].id_index].privkey;
+	CFRetain(se->key);
 
 	if (mm->blocksize_out)
-		se->dec_size = SecKeyGetBlockSize(se->dec_key);
+		se->outsize = SecKeyGetBlockSize(se->key);
 	else
-		se->enc_size = 0;
+		se->outsize = 0;
+
+	se->state = D_INIT;
 
 out:
 	UNLOCK_MUTEX(se->mutex);
@@ -1719,6 +1778,16 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		     (int) indatalen, outdata, (int) *outdatalen);
 
 	/*
+	 * Make sure we have an in-progress operation
+	 */
+
+	if (se->state != D_INIT) {
+		os_log_debug(logsys, "Decrypt operation not initialized");
+		UNLOCK_MUTEX(se->mutex);
+		RET(C_Decrypt, CKR_OPERATION_NOT_INITIALIZED);
+	}
+
+	/*
 	 * If we know our mechanism output size, check first to see if the
 	 * output buffer is big enough.  Also, short-circuit this test if
 	 * outdata is NULL.
@@ -1733,23 +1802,23 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	 */
 
 	if (! outdata) {
-		if (! se->dec_size) {
+		if (! se->outsize) {
 			/* Hmm, what to do here?  No idea! */
 			UNLOCK_MUTEX(se->mutex);
 			RET(C_Decrypt, CKR_BUFFER_TOO_SMALL);
 		}
-		*outdatalen = se->dec_size;
+		*outdatalen = se->outsize;
 		os_log_debug(logsys, "outdata is NULL, returning an output "
-			     "size of %d", (int) se->dec_size);
+			     "size of %d", (int) se->outsize);
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Decrypt, CKR_OK);
 	}
 
-	if (se->dec_size && se->dec_size > *outdatalen) {
+	if (se->outsize && se->outsize > *outdatalen) {
 		os_log_debug(logsys, "Output size is %d, but our output "
-			     "buffer is %d", (int) se->dec_size,
+			     "buffer is %d", (int) se->outsize,
 			     (int) *outdatalen);
-		*outdatalen = se->dec_size;
+		*outdatalen = se->outsize;
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Decrypt, CKR_BUFFER_TOO_SMALL);
 	}
@@ -1757,7 +1826,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 
-	outref = SecKeyCreateDecryptedData(se->dec_key, se->dec_alg, inref,
+	outref = SecKeyCreateDecryptedData(se->key, se->alg, inref,
 					   &err);
 
 	CFRelease(inref);
@@ -1767,10 +1836,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 			     "%{public}@ (%ld)", err,
 			     (long) CFErrorGetCode(err));
 		CFRelease(err);
-		CFRelease(se->dec_key);
-		se->dec_key = NULL;
-		se->dec_size = 0;
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
 		UNLOCK_MUTEX(se->mutex);
+		se->state = NO_PENDING;
 		RET(C_Decrypt, CKR_GENERAL_ERROR);
 	}
 
@@ -1782,9 +1852,10 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		/*
 		 * If the decryption was successful, release our key reference
 		 */
-		CFRelease(se->dec_key);
-		se->dec_key = NULL;
-		se->dec_size = 0;
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
+		se->state = NO_PENDING;
 	}
 
 	*outdatalen = CFDataGetLength(outref);
@@ -1826,6 +1897,16 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * Make sure no operations are in progress
+	 */
+
+	if (se->state != NO_PENDING) {
+		os_log_debug(logsys, "Crypto operation already pending");
+		rv = CKR_OPERATION_ACTIVE;
+		goto out;
+	}
 
 	object--;
 
@@ -1881,6 +1962,8 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		se->outsize = 0;
 	}
 
+	se->state = S_INIT;
+
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -1928,6 +2011,16 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 #endif /* KEYCHAIN_DEBUG */
 
 	/*
+	 * Make sure the signing operation is initialized
+	 */
+
+	if (se->state != S_INIT) {
+		os_log_debug(logsys, "Sign operation not initialized");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+
+	/*
 	 * If we know our mechanism output size, check first to see if the
 	 * output buffer is big enough.  Also, short-circuit this test if
 	 * sig is NULL.
@@ -1936,25 +2029,21 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 	if (! sig) {
 		if (! se->outsize) {
 			/* Hmm, what to do here?  No idea! */
-			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
-			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
+			rv = CKR_BUFFER_TOO_SMALL;
+			goto out;
 		}
 		*siglen = se->outsize;
 		os_log_debug(logsys, "sig is NULL, returning an output "
 			     "size of %d", (int) se->outsize);
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_Sign, CKR_OK);
+		goto out;
 	}
 
 	if (se->outsize && se->outsize > *siglen) {
 		os_log_debug(logsys, "Output size is %d, but our output "
 			     "buffer is %d", (int) se->outsize, (int) *siglen);
 		*siglen = se->outsize;
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_Sign, CKR_BUFFER_TOO_SMALL);
+		rv = CKR_BUFFER_TOO_SMALL;
+		goto out;
 	}
 
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
@@ -1983,14 +2072,12 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		CFRelease(se->key);
 		se->key = NULL;
 		se->outsize = 0;
+		se->state = NO_PENDING;
 	}
 
 	*siglen = CFDataGetLength(outref);
 
 	CFRelease(outref);
-
-	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 #if KEYCHAIN_DEBUG
 	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_SIGFILE"))) {
@@ -2005,6 +2092,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		}
 	}
 #endif /* KEYCHAIN_DEBUG */
+
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
+
 	RET(C_Sign, rv);
 }
 
@@ -2027,6 +2119,16 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * Make sure we are either in S_INIT or S_UPDATE
+	 */
+
+	if (se->state != S_INIT && se->state != S_UPDATE) {
+		os_log_debug(logsys, "Not in S_INIT or S_UPDATE state");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
 
 	/*
 	 * There are some signature operations that cannot take a
@@ -2053,7 +2155,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	 * so we can be algorithm-agnostic.
 	 */
 
-	if (! se->mdc) {
+	if (se->state == S_INIT) {
 		/*
 		 * Because there's not really an API that will let us
 		 * do a multi-part signature operation, we have to calculate
@@ -2067,8 +2169,10 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 				     "function for %s",
 				     getCKMName(se->hash_alg));
 			rv = CKR_GENERAL_ERROR;		
+			se->state = NO_PENDING;
 			goto out;
 		}
+		se->state = S_UPDATE;
 	}
 
 	cc_md_update(se->mdc, indata, indatalen);
@@ -2088,8 +2192,11 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 		  CK_ULONG_PTR siglen)
 {
 	struct session *se;
-	CK_RV rv = CKR_OK;
 	CFErrorRef err = NULL;
+	unsigned char *digest = NULL;
+	unsigned int digest_len;
+	CFDataRef sigout = NULL, datain = NULL;
+	CK_RV rv = CKR_OK;
 
 	FUNCINITCHK(C_SignFinal);
 
@@ -2102,81 +2209,111 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 	LOCK_MUTEX(se->mutex);
 
 	/*
-	 * We have to deal with the case where the caller calls us to probe
-	 * the appropriate output buffer size, so we might get called multiple
-	 * times.  Here's the convention we are going to use.
-	 *
-	 * A valid se->trans means we have a transform which is active.
-	 * But a valid se->wstream means that the transform has not been
-	 * closed and waited on.  So IF we have a still-active transaction
-	 * then check to see if the wstream pointer is still valid.  If it
-	 * is, the close the wstream and wait on the semaphore.  At that
-	 * point we should either have an error, or valid signature data.
-	 *
-	 * Because it is possible to get calls to query the output
-	 * buffer size, we're going to slightly cheat here.  The first
-	 * time we get called, we will generate the signature completely
-	 * and store it in transout.  That will allow us to get the final
-	 * output buffer size and return it if it is a query to just
-	 * return the buffer size.
+	 * Make sure we are in S_UPDATE (C_SignUpdate() has been called
+	 * at least once
 	 */
 
-	if (! se->trans) {
-		os_log_debug(logsys, "No valid transform found");
+	if (se->state != S_UPDATE) {
+		os_log_debug(logsys, "Not in S_UPDATE state");
 		rv = CKR_OPERATION_NOT_INITIALIZED;
 		goto out;
 	}
 
-	if (se->wstream) {
-		CFDataRef final = NULL;
-		CFWriteStreamClose(se->wstream);
-		se->wstream = NULL;
-		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+	/*
+	 * We have to deal with the case where the caller calls us to probe
+	 * the appropriate output buffer size, so we might get called multiple
+	 * times.
+	 *
+	 * As of this writing, all crypto mechanisms we support have
+	 * an output size based on the key block size.  So if we get called
+	 * to probe the output buffer size, then we return the appropriate
+	 * block size.
+	 */
 
-		if (se->transerr) {
-			rv = CKR_GENERAL_ERROR;
-			transform_end(se);
+	if (! sig) {
+		if (! se->outsize) {
+			/* Hmm, what to do here?  No idea! */
+			rv = CKR_BUFFER_TOO_SMALL;
 			goto out;
 		}
-
-		/*
-		 * at this point, transout contains the digest.  Call
-		 * the appropriate function to generate a signature of
-		 * it.  We should be using the "Digest" form of the
-		 * algorithm.
-		 */
-
-		final = SecKeyCreateSignature(se->key, se->dalg,
-					      se->transout, &err);
-
-		if (! final) {
-			os_log_debug(logsys, "SecKeyCreateSignature failed: "
-				     "%{public}@", err);
-			CFRelease(err);
-			rv = CKR_GENERAL_ERROR;
-			transform_end(se);
-			goto out;
-		}
-		CFRelease(se->transout);
-		se->transout = final;
-	}
-
-	if (sig == NULL) {
-		*siglen = CFDataGetLength(se->transout);
-		rv = CKR_OK;
+		*siglen = se->outsize;
+		os_log_debug(logsys, "sig is NULL, returning an output "
+			     "size of %d", (int) se->outsize);
 		goto out;
 	}
 
-	if (*siglen < CFDataGetLength(se->transout)) {
-		*siglen = CFDataGetLength(se->transout);
+	if (se->outsize && se->outsize > *siglen) {
+		os_log_debug(logsys, "Output size is %d, but our output "
+			     "buffer is %d", (int) se->outsize, (int) *siglen);
+		*siglen = se->outsize;
 		rv = CKR_BUFFER_TOO_SMALL;
 		goto out;
 	}
 
-	*siglen = CFDataGetLength(se->transout);
-	CFDataGetBytes(se->transout, CFRangeMake(0, *siglen), sig);
+	/*
+	 * Finalize the digest operation.
+	 */
 
-	transform_end(se);
+	cc_md_final(se->mdc, &digest, &digest_len);
+	se->mdc = NULL;
+
+	/*
+	 * Pass the digested data into the SecKeyCreateSignature
+	 * function.  Note that we use the "digest" algorithm
+	 */
+
+	datain = CFDataCreateWithBytesNoCopy(NULL, digest, digest_len,
+					     kCFAllocatorNull);
+
+	if (! datain) {
+		os_log_debug(logsys, "Unable to create digest CFData");
+		goto outfinish;
+	}
+
+	/*
+	 * Create the actual signature based on the digested data
+	 */
+
+	sigout = SecKeyCreateSignature(se->key, se->dalg, datain, &err);
+
+	if (! sigout) {
+		os_log_debug(logsys, "SecKeyCreateSignature failed: "
+				     "%{public}@", err);
+		CFRelease(err);
+		rv = CKR_FUNCTION_FAILED;
+		goto outfinish;
+	}
+
+	if (*siglen < CFDataGetLength(sigout)) {
+		/*
+		 * This shouldn't happen, but if it does treat it
+		 * as an internal error for now.
+		 */
+
+		os_log_debug(logsys, "Our output buffer size is %d, "
+			     "but the output data is %d bytes!",
+			     (int) *siglen, (int) CFDataGetLength(sigout));
+		rv = CKR_FUNCTION_FAILED;
+		goto out;
+	}
+
+	*siglen = CFDataGetLength(sigout);
+	CFDataGetBytes(sigout, CFRangeMake(0, *siglen), sig);
+
+outfinish:
+	if (digest)
+		free(digest);
+	if (datain)
+		CFRelease(datain);
+	if (sigout)
+		CFRelease(sigout);
+	CFRelease(se->key);
+	se->key = NULL;
+	se->dalg = NULL;
+	se->alg = NULL;
+	se->outsize = 0;
+	se->state = NO_PENDING;
+
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2204,24 +2341,31 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
+	/*
+	 * Make sure no operations are in progress
+	 */
+
+	if (se->state != NO_PENDING) {
+		os_log_debug(logsys, "Crypto operation already pending");
+		rv = CKR_OPERATION_ACTIVE;
+		goto out;
+	}
+
 	key--;
 
 	if (key >= se->obj_list_count) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_VerifyInit, CKR_KEY_HANDLE_INVALID);
+		rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
 	}
 		
 	if (! id_list[se->obj_list[key].id_index].pubcanverify) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_VerifyInit, CKR_KEY_FUNCTION_NOT_PERMITTED);
+		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
+		goto out;
 	}
 
 	if (se->obj_list[key].class != CKO_PUBLIC_KEY) {
-		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
-		RET(C_VerifyInit, CKR_KEY_TYPE_INCONSISTENT);
+		rv = CKR_KEY_TYPE_INCONSISTENT;
+		goto out;
 	}
 
 	/*
@@ -2257,6 +2401,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		se->outsize = 0;
 	}
 
+	se->state = V_INIT;
+
 out:
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -2280,13 +2426,19 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
+	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(se->mutex);
+
+	if (se->state != V_INIT) {
+		os_log_debug(logsys, "No Verify operation initialized");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+
 	inref = CFDataCreateWithBytesNoCopy(NULL, indata, indatalen,
 					    kCFAllocatorNull);
 	sigref = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
 					     kCFAllocatorNull);
-
-	LOCK_MUTEX(id_mutex);
-	LOCK_MUTEX(se->mutex);
 
 	if (!SecKeyVerifySignature(se->key, se->alg, inref, sigref,
 				   &err)) {
@@ -2301,11 +2453,13 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CFRelease(se->key);
 	se->key = NULL;
-
-	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 	CFRelease(inref);
 	CFRelease(sigref);
+	se->state = NO_PENDING;
+
+out:
+	UNLOCK_MUTEX(se->mutex);
+	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Verify, rv);
 }
@@ -2330,17 +2484,26 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	LOCK_MUTEX(se->mutex);
 
 	/*
+	 * Make sure we are in V_INIT or V_UPDATE
+	 */
+
+	if (se->state != V_INIT && se->state != V_UPDATE) {
+		os_log_debug(logsys, "Not in V_INIT or V_UPDATE state");
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+
+	/*
 	 * Make sure we can actually use the Update function; see
 	 * C_SignUpdate for an explanation.
 	 */
 
 	if (!se->dalg) {
 		rv = CKR_DATA_LEN_RANGE;
-		transform_end(se);
 		goto out;
 	}
 
-	if (! se->trans) {
+	if (se->trans == V_INIT) {
 
 		/*
 		 * See the comments in C_SignUpdate for what is going on
