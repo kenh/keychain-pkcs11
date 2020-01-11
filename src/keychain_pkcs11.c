@@ -192,7 +192,7 @@ static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
 static const struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
 static bool mech_param_validate(CK_MECHANISM_PTR, const struct mechanism_map *,
 				SecKeyAlgorithm *, SecKeyAlgorithm *,
-				SecKeyAlgorithm *, CFStringRef *, CFIndex *);
+				SecKeyAlgorithm *, CK_MECHANISM_TYPE *);
 
 /*
  * Our object list and the functions to handle them
@@ -297,8 +297,6 @@ struct session {
 	size_t		outsize;		/* Op output size, 0 unknown */
 	SecKeyAlgorithm	alg;			/* Algorithm for in-prog op */
 	SecKeyAlgorithm dalg;			/* Algorithm, takes digest */
-	CFStringRef	digest;			/* Digest algorithm */
-	CFIndex		diglen;			/* Digest algorithm length */
 	CK_MECHANISM_TYPE hash_alg;		/* Hash algorithm */
 	md_context	mdc;			/* Message digest context */
 };
@@ -1533,7 +1531,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	 */
 
 	if (! mech_param_validate(mech, mm, &se->alg, NULL, NULL,
-				  NULL, NULL)) {
+				  NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -1732,7 +1730,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	if (! mech_param_validate(mech, mm, &se->alg, NULL, NULL,
-				  NULL, NULL)) {
+				  NULL)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -1941,7 +1939,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	if (! mech_param_validate(mech, mm, NULL, &se->alg, &se->dalg,
-				  &se->digest, &se->diglen)) {
+				  &se->hash_alg)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -2380,7 +2378,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	if (! mech_param_validate(mech, mm, NULL, &se->alg, &se->dalg,
-				  &se->digest, &se->diglen)) {
+				  &se->hash_alg)) {
 		rv = CKR_MECHANISM_PARAM_INVALID;
 		goto out;
 	}
@@ -2468,10 +2466,7 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		     CK_ULONG indatalen)
 {
 	struct session *se;
-	CFErrorRef err = NULL;
 	CK_RV rv = CKR_OK;
-	unsigned int count = 0;
-	CFIndex cc;
 
 	FUNCINITCHK(C_VerifyUpdate);
 
@@ -2503,98 +2498,24 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		goto out;
 	}
 
-	if (se->trans == V_INIT) {
-
+	if (se->state == V_INIT) {
 		/*
 		 * See the comments in C_SignUpdate for what is going on
 		 * in this section.
 		 */
 
-		se->trans = SecDigestTransformCreate(se->digest,
-						     se->diglen, &err);
-
-		if (! se->trans) {
-			os_log_debug(logsys, "SecDigestTransformCreate "
-				     "failed: %{public}@", err);
-			CFRelease(err);
-			rv = CKR_GENERAL_ERROR;
+		if (! cc_md_init(se->hash_alg, &se->mdc)) {
+			os_log_debug(logsys, "Unable to initialize digest "
+				     "function for %s",
+				     getCKMName(se->hash_alg));
+			rv = CKR_GENERAL_ERROR;		
+			se->state = NO_PENDING;
 			goto out;
 		}
-
-		CFStreamCreateBoundPair(kCFAllocatorDefault, &se->rstream,
-					&se->wstream, 16384);
-		CFWriteStreamOpen(se->wstream);
-		CFReadStreamOpen(se->rstream);
-
-		if (! SecTransformSetAttribute(se->trans,
-					       kSecTransformInputAttributeName,
-					       se->rstream, &err)) {
-			os_log_debug(logsys, "Unable to set input stream for "
-				     "verify transform: %{public}@", err);
-			rv = CKR_GENERAL_ERROR;
-			goto badtrans;
-		}
-
-		se->sema = dispatch_semaphore_create(0);
-		se->transerr = false;
-
-badtrans:
-		if (rv != CKR_OK) {
-			transform_end(se);
-			goto out;
-		}
-
-		dispatch_async_f(dispatch_get_global_queue(
-				  DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
-			         se, transform_task);
+		se->state = V_UPDATE;
 	}
 
-	/*
-	 * At this point, either the background task has been started,
-	 * or is already running.  Write the requested data to the write
-	 * stream.  Check for any errors; note that we can get a short
-	 * write, so we need a loop.
-	 */
-
-	if (se->transerr) {
-		os_log_debug(logsys, "Aborting operation since our background"
-			     "thread signaled an error");
-		dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
-		transform_end(se);
-		rv = CKR_GENERAL_ERROR;
-		goto out;
-	}
-
-	do {
-		cc = CFWriteStreamWrite(se->wstream, indata + count,
-					indatalen - count);
-
-		if (cc < 0) {
-			err = CFWriteStreamCopyError(se->wstream);
-
-			if (err) {
-				os_log_debug(logsys, "Error writing to "
-					     "transform stream: %{public}@",
-					     err);
-				CFRelease(err);
-			} else {
-				os_log_debug(logsys, "Error writing to "
-					     "transform stream but no "
-					     "error returned");
-			}
-
-			CFWriteStreamClose(se->wstream);
-			se->wstream = NULL;
-
-			dispatch_semaphore_wait(se->sema,
-						DISPATCH_TIME_FOREVER);
-			transform_end(se);
-			rv = CKR_GENERAL_ERROR;
-			goto out;
-		}
-
-		count += cc;
-	} while (count < indatalen);
+	cc_md_update(se->mdc, indata, indatalen);
 
 out:
 	UNLOCK_MUTEX(se->mutex);
@@ -2608,8 +2529,10 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 		    CK_ULONG siglen)
 {
 	struct session *se;
-	CFDataRef sigdata = NULL;
+	CFDataRef sigdata = NULL, digest_data = NULL;
 	CFErrorRef err = NULL;
+	unsigned char *digest = NULL;
+	unsigned int digest_len;
 	CK_RV rv = CKR_OK;
 
 	FUNCINITCHK(C_VerifyFinal);
@@ -2619,46 +2542,47 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 
 	CHECKSESSION(session, se);
 
-	sigdata = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
-					      kCFAllocatorNull);
-
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	/*
-	 * At least this is simpler than C_SignFinal.  Close the write
-	 * stream, wait for the digest to complete, and then try to
-	 * verify it against the signature.
-	 */
-
-	if (! se->trans) {
-		os_log_debug(logsys, "No valid transform found");
+	if (se->state != V_UPDATE) {
+		os_log_debug(logsys, "Not in V_UPDATE state");
 		rv = CKR_OPERATION_NOT_INITIALIZED;
 		goto out;
 	}
 
-	CFWriteStreamClose(se->wstream);
-	se->wstream = NULL;
-	dispatch_semaphore_wait(se->sema, DISPATCH_TIME_FOREVER);
+	sigdata = CFDataCreateWithBytesNoCopy(NULL, sig, siglen,
+					      kCFAllocatorNull);
 
-	if (se->transerr) {
-		rv = CKR_GENERAL_ERROR;
-		transform_end(se);
-		goto out;
-	}
+	/*
+	 * At least this is simpler than C_SignFinal.  Finalize the
+	 * hash function and verify the signature (using the digest
+	 * algorithm).
+	 */
 
-	if (!SecKeyVerifySignature(se->key, se->dalg, se->transout, sigdata,
+	cc_md_final(se->mdc, &digest, &digest_len);
+	se->mdc = NULL;
+
+	digest_data = CFDataCreateWithBytesNoCopy(NULL, digest, digest_len,
+						  kCFAllocatorNull);
+
+	if (!SecKeyVerifySignature(se->key, se->dalg, digest_data, sigdata,
 				   &err)) {
 		os_log_debug(logsys, "VerifySignature failed: %{public}@", err);
 		CFRelease(err);
 		rv = CKR_SIGNATURE_INVALID;
 	}
 
-	transform_end(se);
 out:
+	if (sigdata)
+		CFRelease(sigdata);
+	if (digest_data)
+		CFRelease(digest_data);
+	if (digest)
+		free(digest);
+
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
-	CFRelease(sigdata);
 
 	RET(C_VerifyFinal, rv);
 }
@@ -4917,8 +4841,7 @@ get_mechmap(CK_MECHANISM_TYPE mechtype)
 static bool
 mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 		    SecKeyAlgorithm *encalg, SecKeyAlgorithm *signalg,
-		    SecKeyAlgorithm *dsignalg, CFStringRef *digest,
-		    CFIndex *digestlen)
+		    SecKeyAlgorithm *dsignalg, CK_MECHANISM_TYPE *digest)
 {
 	CK_RSA_PKCS_OAEP_PARAMS_PTR oaep;
 	CK_RSA_PKCS_PSS_PARAMS_PTR pss;
@@ -4958,11 +4881,7 @@ mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 					*mechmap->sec_dsignmech : NULL;
 
 		if (digest)
-			*digest = mechmap->sec_digest ?
-					*mechmap->sec_digest : NULL;
-
-		if (digestlen)
-			*digestlen = mechmap->sec_digestlen;
+			*digest = mechmap->sec_digest;
 
 		return true;
 
@@ -5070,11 +4989,7 @@ found:
 					*keychain_param_map[i].dsignalg : NULL;
 
 	if (digest)
-		*digest = keychain_param_map[i].digest ?
-					*keychain_param_map[i].digest : NULL;
-
-	if (digestlen)
-		*digestlen = keychain_param_map[i].digestlen;
+		*digest = keychain_param_map[i].hash_alg;
 
 	return true;
 }
@@ -5141,12 +5056,6 @@ sess_free(struct session *se)
 	if (se->key)
 		CFRelease(se->key);
 
-	if (se->enc_key)
-		CFRelease(se->enc_key);
-
-	if (se->dec_key)
-		CFRelease(se->dec_key);
-
 	if (se->mdc) {
 		/*
 		 * At this point we need to finalize the digest, but
@@ -5159,31 +5068,6 @@ sess_free(struct session *se)
 		cc_md_final(se->mdc, &digest, &size);
 		free(digest);
 	}
-
-	if (se->wstream) {
-		/*
-		 * If there's an open write stream, then we should
-		 * assume there is a transaction in progress; wait
-		 * for the semaphore to indicate things are finished.
-		 */
-		CFWriteStreamClose(se->wstream);
-
-		if (se->sema)
-			dispatch_semaphore_wait(se->sema,
-						DISPATCH_TIME_FOREVER);
-	}
-
-	if (se->rstream)
-		CFReadStreamClose(se->rstream);
-
-	if (se->trans)
-		CFRelease(se->trans);
-
-	if (se->sema)
-		dispatch_release(se->sema);
-
-	if (se->transout)
-		CFRelease(se->transout);
 
 	UNLOCK_MUTEX(se->mutex);
 	DESTROY_MUTEX(se->mutex);

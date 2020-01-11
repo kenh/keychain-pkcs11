@@ -13,7 +13,6 @@ const struct mechanism_map keychain_mechmap[] = {
 	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT|CKF_SIGN|CKF_VERIFY, NONE,
 	  &kSecKeyAlgorithmRSAEncryptionPKCS1,
 	  &kSecKeyAlgorithmRSASignatureDigestPKCS1v15Raw,
-	  NULL,		/* Again, special case */
 	  NULL, 0	/* Special case - no digest algoritm specified */,
 	  true,
 	},
