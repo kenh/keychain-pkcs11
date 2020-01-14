@@ -10,7 +10,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include
 
 lib_LTLIBRARIES = keychain-pkcs11.la
 dist_man8_MANS = man/keychain-pkcs11.man
-check_PROGRAMS = pkcs11_test
+check_PROGRAMS = pkcs11_test pktest
 
 keychain_pkcs11_la_SOURCES = \
 			src/keychain_pkcs11.c \
@@ -42,7 +42,7 @@ keychain_pkcs11_la_LDFLAGS = \
 			#
 
 ##
-## Sources for our test program; only built by "make check"
+## Sources for our test programs; only built by "make check"
 ##
 
 pkcs11_test_SOURCES = \
@@ -50,6 +50,10 @@ pkcs11_test_SOURCES = \
 		src/debug.c \
 		test/pkcs11_test.h \
 		include/debug.h \
+		#
+
+pktest_SOURCES = \
+		test/pktest.c \
 		#
 
 ##
