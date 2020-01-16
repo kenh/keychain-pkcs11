@@ -54,6 +54,8 @@ pkcs11_test_SOURCES = \
 
 pktest_SOURCES = \
 		test/pktest.c \
+		src/debug.c \
+		include/debug.h \
 		#
 
 ##
@@ -61,6 +63,7 @@ pktest_SOURCES = \
 ## name and not conflict with the use of debug.c in the shared library.
 ##
 pkcs11_test_CFLAGS = $(AM_CFLAGS)
+pktest_CFLAGS = $(AM_CFLAGS)
 
 ##
 ## Extra files that need to appear in our distribution that Automake won't
