@@ -21,6 +21,7 @@ AC_CHECK_FUNCS([setprogname])
 default_APPIDENTIFIER="mil.navy.nrl.cmf.pkcs11"
 AC_ARG_VAR([APPIDENTIFIER],
 	   [Application bundle identifier of package, defaults to 'mil.navy.nrl.cmf.pkcs11'])
+KC_SIGNING
 
 : "${APPIDENTIFIER=$default_APPIDENTIFIER}"
 

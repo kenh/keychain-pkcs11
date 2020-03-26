@@ -83,8 +83,16 @@ CLEANFILES=$(PACKAGE_NAME)-*.pkg
 package:
 	rm -rf $(PACKAGEBUILDDIR)
 	$(MAKE) install DESTDIR=$(PACKAGEBUILDDIR)
-	pkgbuild \
-		--root "$(PACKAGEBUILDDIR)$(prefix)" \
+	rm -f $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.la
+	$(CODESIGN) --timestamp --sign "$(APP_SIGNING_ID)" $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.dylib
+##	pkgbuild \
+##		--root "$(PACKAGEBUILDDIR)$(prefix)" \
+##		--identifier "$(APPIDENTIFIER)" \
+##		--install-location "$(prefix)" \
+##		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
+	productbuild \
 		--identifier "$(APPIDENTIFIER)" \
-		--install-location "$(prefix)" \
+		--sign "$(INSTALLER_SIGN_CN)" \
+		--timestamp \
+		--root $(PACKAGEBUILDDIR) \
 		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
