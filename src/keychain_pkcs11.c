@@ -366,6 +366,7 @@ static const char *default_cert_search[] = {
 
 static const char *default_cert_applist[] = {
 	"firefox",
+	"thunderbird",
 	NULL,
 };
 
