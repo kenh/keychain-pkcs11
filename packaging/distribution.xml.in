@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Keychain-PKCS11</title>
+    <options customize="never"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="10.12.6"/>
+        </allowed-os-versions>
+    </volume-check>
+    <welcome file="welcome.rtf" mime-type="text/rtf"/>
+    <readme file="readme.rtf" mime-type="text/rtf"/>
+    <conclusion file="conclusion.rtf" mime-type="text/rtf"/>
+    <choice id="@APPIDENTIFIER@.dylib" visible="true" start_selected="true" title="Keychain-PKCS11 dylib"
+        description="The dynamic library and associated man page implementing the PKCS11 interface to the Keychain">
+	<pkg-ref id="@APPIDENTIFIER@.dylib">dylib.pkg</pkg-ref>
+    </choice>
+    <choices-outline>
+        <line choice="@APPIDENTIFIER@.dylib"/>
+    </choices-outline>
+</installer-gui-script>

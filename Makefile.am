@@ -79,56 +79,55 @@ EXTRA_DIST = README.md
 
 PACKAGEBUILDDIR=/tmp/packagebuild
 NOTARIZE_STATUS=/tmp/notarize-status
-CLEANFILES=$(PACKAGE_NAME)-*.pkg
-.PHONY: package product destdir package-signed package-unsigned product-signed product-unsigned notarize
+CLEANFILES=$(PACKAGE_NAME)-*.pkg dylib.pkg
+.PHONY: packages product destdir notarize
 
-PACKAGE_FLAGS = \
-	--root "$(PACKAGEBUILDDIR)" \
-	--identifier "$(APPIDENTIFIER)" \
-	--install-location "/" \
-	--version $(PACKAGE_VERSION) \
-	#
-
-PACKAGE_SIGN_FLAGS = \
-	--sign "$(INSTALLER_SIGN_CN)" \
-	--timestamp \
-	#
-
-## Common framework to create a DESTDIR for a package
+##
+## Build a destination directory for our component packages
+##
 
 destdir:
 	rm -rf $(PACKAGEBUILDDIR)
 	$(MAKE) install DESTDIR=$(PACKAGEBUILDDIR)
 	rm -f $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.la
 	if [ "$(APP_SIGNING_ID)" != "unknown" ]; then \
-	  $(CODESIGN) --timestamp --sign "$(APP_SIGNING_ID)" $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.dylib; \
+	  $(CODESIGN) --timestamp --sign "$(APP_SIGNING_ID)" --identifier "$(APP_SIGNING_ID).keychain-pkcs11.dylib" $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.dylib; \
 	fi
 
-## Build a component package using pkgbuild
+##
+## Build our component packages necessary for the product archive.
+##
+## Note that component packages themselves do not need to be signed.
+## Signing of the product archive takes care of that.
+##
 
-package: destdir
-	@if [ "$(INSTALLER_SIGN_CN)" != "unknown" ]; then \
-		$(MAKE) package-signed; \
-	else \
-		$(MAKE) package-unsigned; \
-	fi
+packages: destdir
+	$(PKGBUILD) \
+		--root "$(PACKAGEBUILDDIR)" \
+		--identifier "$(APPIDENTIFIER).dylib" \
+		--install-location "/" \
+		--version $(PACKAGE_VERSION) \
+		dylib.pkg
 
-package-signed:
-	$(PKGBUILD) $(PACKAGE_FLAGS) $(PACKAGE_SIGN_FLAGS) \
-		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
-
-package-unsigned:
-	$(PKGBUILD) $(PACKAGE_FLAGS) \
-		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
-
-product: destdir
+product: packages packaging/distribution.xml
 	$(PRODUCTBUILD) \
 		--identifier "$(APPIDENTIFIER)" \
-		--sign "$(INSTALLER_SIGN_CN)" \
-		--timestamp \
-		--root $(PACKAGEBUILDDIR) \
 		--version $(PACKAGE_VERSION) \
+		--resources "$(srcdir)/packaging/resources" \
+		--resources "./packaging/resources" \
+		--distribution "./packaging/distribution.xml" \
 		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg
+	@if [ "$(INSTALLER_SIGN_CN)" != "unknown" ]; then \
+		rm -f tmp-$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg; \
+		set -x; \
+		$(PRODUCTSIGN) \
+			--timestamp \
+			--sign "$(INSTALLER_SIGN_CN)" \
+			$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg \
+			tmp-$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg; \
+		mv -f tmp-$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg \
+			$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg; \
+	fi
 
 ##
 ## Submit to the notarization service and wait for it to complete, then

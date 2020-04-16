@@ -1,0 +1,28 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2512
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\froman\fcharset0 TimesNewRomanPSMT;\f1\fmodern\fcharset0 Courier;}
+{\colortbl;\red255\green255\blue255;\red230\green230\blue230;\red0\green0\blue0;\red0\green0\blue0;
+}
+{\*\expandedcolortbl;;\csgray\c92143;\csgray\c0\c0;\cssrgb\c0\c0\c0;
+}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{square\}}{\leveltext\leveltemplateid1\'01\uc0\u9642 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid1}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\qc\partightenfactor0
+
+\f0\fs36 \cf0 IMPORTANT NOTES\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\fs28 \cf0 \
+\pard\tx220\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\li720\fi-720\pardirnatural\partightenfactor0
+\ls1\ilvl0\cf0 {\listtext	\uc0\u9642 	}Keychain-PKCS11 is only a library, and is not useful by itself. It is only useful when utilized by an application which can load PKCS#11 modules.\
+{\listtext	\uc0\u9642 	}Keychain-PKCS11 is designed to be used with the Apple-supplied SmartCard drivers and libraries, and is only supported on High Sierra and newer.\
+{\listtext	\uc0\u9642 	}Keychain-PKCS11 cannot be used if you are using the older-style 
+\f1 \cb2 tokend
+\f0 \cb3  SmartCard interface.\
+\ls1\ilvl0\cb1 {\listtext	\uc0\u9642 	}If your application is on MacOS X Catalina or newer AND it is running in the hardened runtime environment, it MUST have the 
+\f1 \cf4 \cb2 com.apple.security.smartcard
+\f0 \cb3  entitlement enabled. Most applications that access SmartCards already do this.\
+{\listtext	\uc0\u9642 	}Keychain-PKCS11 is explicitly NOT designed to provide a PKCS#11 interface to all Keychain resources, but it can optionally be configured to provide an interface to trusted certificates in the keychain. See the 
+\f1 \cb2 keychain-pkcs11(8)
+\f0 \cb3  man page for more details.\
+}

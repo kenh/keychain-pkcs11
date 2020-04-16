@@ -29,6 +29,8 @@ AC_DEFINE_UNQUOTED([APPIDENTIFIER], ["$APPIDENTIFIER"],
 	[Application bundle identifier of package])
 AC_SUBST([APPIDENTIFIER])
 
-AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([Makefile packaging/distribution.xml]
+		[packaging/resources/welcome.rtf:packaging/resources/welcome-in.rtf])
+
 AC_CONFIG_HEADER([include/config.h])
 AC_OUTPUT

@@ -20,6 +20,7 @@ AC_PATH_PROG([SECURITY], [security], [missing])
 AC_PATH_PROG([CODESIGN], [codesign], [missing])
 AC_PATH_PROG([XCRUN], [xcrun], [missing])
 AC_PATH_PROG([PRODUCTBUILD], [productbuild], [missing])
+AC_PATH_PROG([PRODUCTSIGN], [productsign], [missing])
 AC_PATH_PROG([PKGBUILD], [pkgbuild], [missing])
 AC_PATH_PROG([PLBUDDY], [PlistBuddy], [missing],
 	     [/usr/libexec$PATH_SEPARATOR$PATH])
