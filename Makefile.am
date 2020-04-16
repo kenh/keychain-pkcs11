@@ -116,7 +116,7 @@ packages: destdir
 		--version $(PACKAGE_VERSION) \
 		dylib.pkg
 
-product: packages packaging/distribution.xml
+product: packages packaging/distribution.xml packaging/resources/welcome.rtf
 	$(PRODUCTBUILD) \
 		--identifier "$(APPIDENTIFIER)" \
 		--version $(PACKAGE_VERSION) \
