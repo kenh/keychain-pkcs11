@@ -3230,7 +3230,7 @@ scan_certificates(void)
 	char **certs = NULL, **p;
 	CFMutableArrayRef cmatch = NULL;
 	CFMutableSetRef certset = NULL;
-	CFDictionaryRef query = NULL;
+	CFMutableDictionaryRef query = NULL;
 	CFTypeRef result = NULL;
 	OSStatus ret;
 	unsigned int i, count;
@@ -3285,22 +3285,6 @@ scan_certificates(void)
 	 *	certificate.
 	 */
 
-	const void *keys[] = { 
-		kSecClass,
-		kSecMatchLimit,
-		kSecMatchTrustedOnly,
-		kSecReturnRef,
-		kSecReturnAttributes,
-	};
-
-	const void *values[] = {
-		kSecClassCertificate,	/* kSecClass */
-		kSecMatchLimitAll,	/* kSecMatchLimit */
-		kCFBooleanTrue,		/* kSecMatchTrustedOnly */
-		kCFBooleanTrue,		/* kSecReturnRef */
-		kCFBooleanTrue,		/* kSecReturnAttributes */
-	};
-
 	/*
 	 * Short circuit the search if "none" is the first entry
 	 */
@@ -3341,16 +3325,12 @@ scan_certificates(void)
 	 * Get a list of all certificates
 	 */
 
-	query = CFDictionaryCreate(NULL, keys, values,
-				   sizeof(keys)/sizeof(keys[0]),
-				   &kCFTypeDictionaryKeyCallBacks,
-				   &kCFTypeDictionaryValueCallBacks);
-
-	if (! query) {
-		os_log_debug(logsys, "Unable to create query "
-			     "dictionary for match string \"%s\"", *p);
+	if (! add_dict(&query, kSecClass, kSecClassCertificate))
 		goto out;
-	}
+	add_dict(&query, kSecMatchLimit, kSecMatchLimitAll);
+	add_dict(&query, kSecMatchTrustedOnly, kCFBooleanTrue);
+	add_dict(&query, kSecReturnRef, kCFBooleanTrue);
+	add_dict(&query, kSecReturnAttributes, kCFBooleanTrue);
 
 	os_log_debug(logsys, "About to call SecItemCopyMatching");
 
@@ -3744,14 +3724,13 @@ static SecAccessControlRef
 getaccesscontrol(CFDictionaryRef dict)
 {
 	SecAccessControlRef accret;
-	CFDictionaryRef accquery, attrdict;
+	CFMutableDictionaryRef accquery = NULL;
+	CFDictionaryRef attrdict;
 	CFDataRef label;
 	OSStatus ret;
 
 	/*
 	 * Our keys for our query dictionary for SecItemCopyMaching().
-	 *
-	 * In order:
 	 *
 	 * kSecClass = kSecClassKey
 	 *	This means we're searching for keys (instead of identities
@@ -3770,23 +3749,6 @@ getaccesscontrol(CFDictionaryRef dict)
 	 *	SecAccessControlRef
 	 */
 
-	const void *keys[] = {
-		kSecClass,
-		kSecAttrKeyClass,
-		kSecAttrApplicationLabel,
-#define ATTR_LABEL_INDEX 2
-		kSecMatchLimit,
-		kSecReturnAttributes,
-	};
-
-	const void *values[] = {
-		kSecClassKey,		/* kSecClass */
-		kSecAttrKeyClassPrivate,/* kSecAttrKeyClass */
-		NULL,			/* Application Label, fill in later */
-		kSecMatchLimitOne,	/* kSecMatchLimit */
-		kCFBooleanTrue,		/* kSecReturnAttributes */
-	};
-
 	/*
 	 * Build our query dictionary to retrieve the key attributes.  We
 	 * need the application label from the original identity (this is
@@ -3799,18 +3761,12 @@ getaccesscontrol(CFDictionaryRef dict)
 		return NULL;
 	}
 
-	values[ATTR_LABEL_INDEX] = label;
-
-	accquery = CFDictionaryCreate(NULL, keys, values,
-				      sizeof(keys)/sizeof(keys[0]),
-				      &kCFTypeDictionaryKeyCallBacks,
-				      &kCFTypeDictionaryValueCallBacks);
-
-	if (accquery == NULL) {
-		os_log_debug(logsys, "Access control ref query dictionary "
-			     "creation returned NULL");
+	if (! add_dict(&accquery, kSecClass, kSecClassKey))
 		return NULL;
-	}
+	add_dict(&accquery, kSecAttrKeyClass, kSecAttrKeyClassPrivate);
+	add_dict(&accquery, kSecAttrApplicationLabel, label);
+	add_dict(&accquery, kSecMatchLimit, kSecMatchLimitOne);
+	add_dict(&accquery, kSecReturnAttributes, kCFBooleanTrue);
 
 	/*
 	 * Perform the actual query
@@ -3860,8 +3816,10 @@ getaccesscontrol(CFDictionaryRef dict)
 static char *
 getkeylabel(SecKeyRef key)
 {
-	CFDictionaryRef keyattr = NULL, query = NULL, result = NULL;
-	CFStringRef label;
+	CFMutableDictionaryRef query = NULL;
+	CFDictionaryRef keyattr = NULL, result = NULL;
+	CFStringRef label, class;
+	CFDataRef applabel;
 	OSStatus ret;
 	char *retstr;
 
@@ -3888,24 +3846,6 @@ getkeylabel(SecKeyRef key)
 	 * kSecReturnAttributes = kCFBooleanTrue
 	 */
 
-	const void *keys[] = {
-		kSecClass,
-#define KEYCLASS_INDEX 1
-		kSecAttrKeyClass,
-#define KEYLABEL_INDEX 2
-		kSecAttrApplicationLabel,
-		kSecMatchLimit,
-		kSecReturnAttributes,
-	};
-
-	const void *values[] = {
-		kSecClassKey,		/* kSecClass */
-		NULL,			/* kSecAttrKeyClass */
-		NULL,			/* kSecAttrApplicationLabel */
-		kSecMatchLimitOne,	/* kSecMatchLimit */
-		kCFBooleanTrue,		/* kSecReturnAttributes */
-	};
-
 	keyattr = SecKeyCopyAttributes(key);
 
 	if (! keyattr) {
@@ -3915,29 +3855,27 @@ getkeylabel(SecKeyRef key)
 	}
 
 	if (! CFDictionaryGetValueIfPresent(keyattr, kSecAttrKeyClass,
-					    &values[KEYCLASS_INDEX])) {
+					    (const void **) &class)) {
 		os_log_debug(logsys, "Cannot find KeyClass in dict");
 		retstr = strdup("Unknown key");
 		goto out;
 	}
 
 	if (! CFDictionaryGetValueIfPresent(keyattr, kSecAttrApplicationLabel,
-					    &values[KEYLABEL_INDEX])) {
+					    (const void **) &applabel)) {
 		os_log_debug(logsys, "Cannot find AppLabel in dict");
 		retstr = strdup("Unknown key");
 		goto out;
 	}
 
-	query = CFDictionaryCreate(NULL, keys, values,
-				   sizeof(keys)/sizeof(keys[0]),
-				   &kCFTypeDictionaryKeyCallBacks,
-				   &kCFTypeDictionaryValueCallBacks);
-
-	if (! query) {
-		os_log_debug(logsys, "Unable to create query dictionary");
+	if (! add_dict(&query, kSecClass, kSecClassKey)) {
 		retstr = strdup("Unknown key");
 		goto out;
 	}
+	add_dict(&query, kSecAttrKeyClass, class);
+	add_dict(&query, kSecAttrApplicationLabel, applabel);
+	add_dict(&query, kSecMatchLimit, kSecMatchLimitOne);
+	add_dict(&query, kSecReturnAttributes, kCFBooleanTrue);
 
 	ret = SecItemCopyMatching(query, (CFTypeRef *) &result);
 
