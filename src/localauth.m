@@ -58,6 +58,15 @@
  *
  * I still think Apple is a net positive in the Universe, but it's things
  * like this that sometimes make me think Peggy is right about you.
+ *
+ * UPDATE: 6/3/2020
+ *
+ * I just discovered that in Catalina Apple OFFICALLY made the SmartCardPIN
+ * credentials a public interface.  In LAPublicDefines.h:
+ *
+ * #define kLACredentialSmartCardPIN                          -3
+ *
+ * I officially recind my curse above.  Thank you, Apple!
  */
 
 #import <LocalAuthentication/LocalAuthentication.h>
@@ -65,6 +74,14 @@
 #include "keychain_pkcs11.h"
 #include "mypkcs11.h"
 #include "localauth.h"
+
+/*
+ * Backwards compatibility
+ */
+
+#ifndef kLACredentialSmartCardPIN
+#define kLACredentialSmartCardPIN -3
+#endif /* kLACredentialSmartCardPIN */
 
 /*
  * Allocate and return a new LAContext
@@ -107,11 +124,7 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec,
 	__block NSError *e_ref = NULL;
 	dispatch_semaphore_t sema;
 
-	b = [lac setCredential: password
-#if 0
-				type: LACredentialTypeApplicationPassword];
-#endif
-				type: -3];
+	b = [lac setCredential: password type: kLACredentialSmartCardPIN];
 
 	[password release];
 
@@ -174,7 +187,7 @@ lacontext_logout(void *l)
 	LAContext *lac = (LAContext *) l;
 	BOOL b;
 
-	b = [lac setCredential: NULL type: -3];
+	b = [lac setCredential: NULL type: kLACredentialSmartCardPIN];
 
 	if (b != YES)
 		os_log_debug(logsys, "WARNING: unable to logout of credential");
