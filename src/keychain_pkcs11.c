@@ -2924,6 +2924,13 @@ add_token_id(CFStringRef tokenid)
 	slot_list = realloc(slot_list, sizeof(*slot_list) * slot_count);
 
 got_slot:
+	/*
+	 * Bring over the token label, which is just going to be the
+	 * first identity label.
+	 */
+
+	token->label = strdup(token->id_list[0]->label);
+
 	os_log_debug(logsys, "Adding new token at slot %u", i);
 	slot_list[i] = token;
 
