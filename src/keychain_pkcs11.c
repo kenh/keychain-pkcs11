@@ -1,5 +1,29 @@
 /*
  * Our main driver for the keychain_pkcs11 module
+ *
+ * Some explanation here, since this gets confusing fast.
+ *
+ * We maintain an array of SLOTS.  Slots are identified by integers,
+ * starting at zero.
+ *
+ * Each slot can have a single TOKEN associated with it.  A slot can also
+ * NOT have a token.
+ *
+ * Each token has a series of OBJECTS, each identified by a positive integer
+ * OBJECT HANDLE (object handles cannot be zero).  Objects can be
+ * things like certificates, public keys, private keys. and NSS trust
+ * objects.
+ *
+ * To access objects on a token you open a SESSION, identified by a positive
+ * integer SESSION HANDLE (session handles cannot be zero).
+ *
+ * The object handle namespace is per-token - object 5 on the same token
+ * always identifies the same object, even across different sessions.
+ *
+ * The session handle namespace is global; different sessions can refer
+ * to different tokens.  But as specified above, if two sessions are opened
+ * to the same token, the object handle namespace is shared; object 5,
+ * for example, would refer to the same object.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -15,6 +39,7 @@
 
 #include "mypkcs11.h"
 #include "keychain_pkcs11.h"
+#include "tokenwatcher.h"
 #include "localauth.h"
 #include "certutil.h"
 #include "ccglue.h"
@@ -27,44 +52,47 @@
 #define CK_MAJOR_VERSION 2
 #define CK_MINOR_VERSION 40
 
-/* Our slot numbers we use */
-#define TOKEN_SLOT		1
-#define CERTIFICATE_SLOT	2
+/* Our "special" slot numbers we use */
+#define CERTIFICATE_SLOT	254
 
 /*
- * Return CKR_SLOT_ID_INVALID if we are given anything except TOKEN_SLOT
- * or CERTIFICATE_SLOT
+ * Return CKR_SLOT_ID_INVALID if we aren't using a valid slot or we aren't
+ * given CERTIFICATE_SLOT.
+ *
+ * Note: must be called with slot_mutex locked.
  */
 
 #define CHECKSLOT(slot, present) \
 do { \
-	if (slot != TOKEN_SLOT && slot != CERTIFICATE_SLOT) { \
+	if (slot != CERTIFICATE_SLOT && slot >= slot_count) { \
 		os_log_debug(logsys, "Slot %lu is invalid, returning " \
 			     "CKR_SLOT_ID_INVALID", slot); \
+		UNLOCK_MUTEX(slot_mutex); \
 		return CKR_SLOT_ID_INVALID; \
 	} \
 	if (slot == CERTIFICATE_SLOT && ! cert_slot_enabled) { \
 		os_log_debug(logsys, "Requested cert slot (%lu) but is " \
 			     "disabled, returning CKR_SLOT_ID_INVALID", slot); \
+		UNLOCK_MUTEX(slot_mutex); \
 		return CKR_SLOT_ID_INVALID; \
 	} \
 	if (present) { \
-		switch (slot) { \
-		case TOKEN_SLOT: \
-			if (id_list_count == 0) { \
-				os_log_debug(logsys, "Requested token slot " \
-					     "but no token present, " \
-					     "returning " \
-					     "CKR_TOKEN_NOT_PRESENT"); \
-				return CKR_TOKEN_NOT_PRESENT; \
-			} \
-			break; \
-		case CERTIFICATE_SLOT: \
+		if (slot == CERTIFICATE_SLOT) { \
 			if (atomic_load(&cert_list_status) != initialized) { \
 				os_log_debug(logsys, "Requested certificate " \
 					     "slot, but certificate list " \
 					     "not initialized yet, returning" \
 					     " CKR_TOKEN_NOT_PRESENT"); \
+				UNLOCK_MUTEX(slot_mutex); \
+				return CKR_TOKEN_NOT_PRESENT; \
+			} \
+		} else { \
+			if (slot_list[slot] == NULL) { \
+				os_log_debug(logsys, "Requested token slot " \
+					     "but no token present, " \
+					     "returning " \
+					     "CKR_TOKEN_NOT_PRESENT"); \
+				UNLOCK_MUTEX(slot_mutex); \
 				return CKR_TOKEN_NOT_PRESENT; \
 			} \
 		} \
@@ -152,6 +180,46 @@ static kc_mutex id_mutex;
 static kc_mutex sess_mutex;
 
 /*
+ * Information about a slot
+ *
+ * We used to glom everything into one virtual "slot", but that started
+ * not working very well when we started to have multiple devices on one
+ * machine.  So here's the new way.
+ *
+ * We segregate things by token identifier; when new tokens are detected
+ * we try to find an empty slot for them; if we don't have an empty slot
+ * then we create a new one.
+ *
+ * We always keep at least one slot around when there are no tokens as
+ * an "empty" slot.
+ *
+ * As a note: the "object" namespace is per-token, NOT per-session.  So
+ * we maintain a separate list of objects for each token
+ */
+
+static kc_mutex slot_mutex;
+
+struct slot_entry {
+	CFStringRef		tokenid;	/* Slot Token identifier */
+	struct id_info ** 	id_list;	/* Array of slot identities */
+	unsigned int		id_count;	/* Array count */
+	unsigned int		id_size;	/* Array size */
+	struct obj_info *	obj_list;	/* Object list */
+	unsigned int		obj_count;	/* Object count */
+	unsigned int		obj_size;	/* Object array size */
+	bool			logged_in;	/* Are we logged into card? */
+	char *			label;		/* Slot label */
+	void *			lacontext; 	/* LocalAuth context */
+	kc_mutex		entry_mutex;	/* Lock for slot entry */
+	unsigned int		refcount;	/* Slot reference count */
+};
+
+/* These should get filled in at library start-up time */
+static struct slot_entry **slot_list = NULL;
+static unsigned int slot_count = 0;
+static void slot_entry_free(struct slot_entry *);
+
+/*
  * Our list of identities that is stored on our smartcard
  */
 
@@ -171,22 +239,16 @@ struct id_info {
 	bool			pubcanwrap;	/* Can pubkey wrap? */
 };
 
-static struct id_info *id_list = NULL;
-static unsigned int id_list_count = 0;		/* Number of valid entries */
-static unsigned int id_list_size = 0;		/* Number of alloc'd entries */
-static bool id_list_init = false;		/* Is ID list initialized? */
 static bool ask_pin = false;			/* Should we ask for a PIN? */
-static bool logged_in = false;			/* Are we logged into card? */
-static void *lacontext = NULL;			/* LocalAuth context */
 
-static int scan_identities(void);
-static int add_identity(CFDictionaryRef);
+static int add_identity(struct slot_entry *, CFDictionaryRef);
 static SecAccessControlRef getaccesscontrol(CFDictionaryRef);
 static unsigned int cflistcount(CFTypeRef);	/* Count of list entries */
 static CFDictionaryRef cfgetindex(CFTypeRef, unsigned int);/* Entry in list */
-static void id_list_free(void);
+static void id_info_free(struct id_info *);
+static void id_list_free(struct id_info **, unsigned int);
 static CK_KEY_TYPE convert_keytype(CFNumberRef);
-static void token_logout(void);
+static void token_logout(struct slot_entry *);
 static void get_index_bytes(unsigned int, unsigned char **, unsigned int *);
 static bool add_dict(CFMutableDictionaryRef *, const void *, const void *);
 static const struct mechanism_map *get_mechmap(CK_MECHANISM_TYPE);
@@ -218,8 +280,8 @@ static bool mech_param_validate(CK_MECHANISM_PTR, const struct mechanism_map *,
  */
 
 struct obj_info {
-	unsigned int		id_index;
-	unsigned char		id_value[sizeof(CK_ULONG)];
+	struct id_info *	id;
+	/* unsigned char		id_value[sizeof(CK_ULONG)]; */
 	CK_OBJECT_CLASS		class;
 	CK_ATTRIBUTE_PTR	attrs;
 	unsigned int		attr_count;
@@ -230,12 +292,14 @@ struct obj_info {
 	os_log_debug(logsys, "Object %lu (%s)", obj, \
 		     getCKOName(se->obj_list[obj].class));
 
-static void build_id_objects(int);
+static void build_id_objects(struct slot_entry *);
 static void obj_free(struct obj_info **, unsigned int *, unsigned int *);
 
+#if 0
 static struct obj_info *id_obj_list = NULL;	/* Identity object list */
 static unsigned int id_obj_count = 0;		/* Identity object list count */
 static unsigned int id_obj_size = 0;		/* Size of identity obj_list */
+#endif
 
 /*
  * Our session "state" for operations that span multiple functions.
@@ -287,6 +351,7 @@ enum s_state { NO_PENDING, E_INIT, E_UPDATE, D_INIT, D_UPDATE, S_INIT,
 struct session {
 	kc_mutex 	mutex;			/* Session mutex */
 	CK_SLOT_ID	slot_id;		/* Slot identifier */
+	struct slot_entry *token;		/* Token pointer */
 	struct obj_info *obj_list;		/* Pointer to object list */
 	unsigned int	obj_list_count;		/* Copy of object count */
 	unsigned int	obj_search_index;	/* Current search index */
@@ -535,8 +600,18 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 		os_log_debug(logsys, "init was set to NULL");
 	}
 
+	CREATE_MUTEX(slot_mutex);
 	CREATE_MUTEX(id_mutex);
 	CREATE_MUTEX(sess_mutex);
+
+	/*
+	 * Allocate the initial slot array and set the count correctly.
+	 * We always have a minimum count of "1".
+	 */
+
+	slot_list = malloc(sizeof(*slot_list) * 1);
+	slot_count = 1;
+	slot_list[0] = NULL;
 
 	/*
 	 * By default we let the Security framework pop up a dialog box
@@ -607,6 +682,8 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 					 NULL, background_cert_scan);
 	}
 
+	start_token_watcher();
+
 	module_initialized = 1;
 
 	RET(C_Initalize, CKR_OK);
@@ -618,6 +695,8 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 
 CK_RV C_Finalize(CK_VOID_PTR p)
 {
+	int i;
+
 	FUNCINITCHK(C_Finalize);
 
 	if (p) {
@@ -625,21 +704,27 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 		RET(C_Finalize, CKR_ARGUMENTS_BAD);
 	}
 
-	LOCK_MUTEX(id_mutex);
+	/*
+	 * Before anything else happens, stop receiving token watcher
+	 * events
+	 */
+
+	stop_token_watcher();
+
+	LOCK_MUTEX(slot_mutex);
 	LOCK_MUTEX(sess_mutex);
 
-	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
-	id_list_free();
-	if (lacontext)
-		lacontext_free(lacontext);
-	lacontext = NULL;
-	logged_in = false;
+	for (i = 0; i < slot_count; i++)
+		if (slot_list[i])
+			slot_entry_free(slot_list[i]);
+
+	free(slot_list);
 
 	UNLOCK_MUTEX(sess_mutex);
-	UNLOCK_MUTEX(id_mutex);
+	UNLOCK_MUTEX(slot_mutex);
 
-	DESTROY_MUTEX(id_mutex);
 	DESTROY_MUTEX(sess_mutex);
+	DESTROY_MUTEX(slot_mutex);
 
 	if (atomic_load(&cert_list_status) == initialized) {
 		obj_free(&cert_obj_list, &cert_obj_count, &cert_obj_size);
@@ -680,10 +765,11 @@ CK_RV C_GetInfo(CK_INFO_PTR p)
 
 /* C_GetFunctionList declared above */
 
-CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
+CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR ret_slot_list,
 		    CK_ULONG_PTR slot_num)
 {
-	CK_RV rv;
+	CK_RV rv = CKR_OK;
+	unsigned int i, count, sindex;
 
 	FUNCINITCHK(C_GetSlotList);
 
@@ -692,64 +778,82 @@ CK_RV C_GetSlotList(CK_BBOOL token_present, CK_SLOT_ID_PTR slot_list,
 		     (int) *slot_num);
 
 	/*
-	 * We will (re) check our identity list if slot_list is NULL.
+	 * We used to perform the identity scan here, but that has
+	 * changed.
 	 *
-	 * We've gone back and forth on this; before we only did a rescan
-	 * if C_Finalize()/C_Initialize() was called, but that doesn't
-	 * seem quite right for some applications.  So right now we'll
-	 * check if things have changed if slot_list is NULL.
+	 * We now register a TKTokenWatcher event handler which will generate
+	 * insertion events for current and new tokens.  So by the time we
+	 * get HERE, we should already know about any tokens that we
+	 * have.
+	 *
+	 * If a slot list entry is NULL, then the slot has no token.
+	 *
+	 * If we are using the Keychain certificate slot, then
+	 * it always counts as "present".
 	 */
 
-	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(slot_mutex);
 
-	if (! slot_list || ! id_list_init) {
-		if (scan_identities()) {
-			rv = CKR_FUNCTION_FAILED;
-			goto out;
-		}
+	/*
+	 * Count up how many tokens we have,  If token_present is true,
+	 * then only count tokens that exist.
+	 */
+
+	if (token_present) {
+		for (i = 0, count = 0; i < slot_count; i++)
+			if (slot_list[i])
+				count++;
+	} else {
+		count = slot_count;
+	}
+
+	if (cert_slot_enabled)
+		count++;
+
+	/*
+	 * If we can't store all of the slot IDs, then return
+	 * BUFFER_TOO_SMALL (but make sure we return the proper count
+	 * in the slot_num pointer).  Also short-circuit this test if
+	 * ret_slot_list is NULL (in that case, we return CKR_OK).
+	 */
+
+	if (ret_slot_list == NULL)
+		goto out;
+
+	if (*slot_num < count) {
+		rv = CKR_BUFFER_TOO_SMALL;
+		goto out;
 	}
 
 	/*
-	 * So, here's the rule.  We only have one "slot"; tests show
-	 * that at least on High Sierra, multiple readers pluggged in
-	 * don't work, you can only see one.  So we only return one slot,
-	 * with a slot number of 1.  If token_present is false, we ALWAYS
-	 * return the slot; if token_present is true, then we return the
-	 * slot only if we have identities (because we search for hardware
-	 * token identities, this means we have a hardware token)
+	 * Return the slot identifier (if token_present is true, only
+	 * if it has a token), which is just an index into our slot list.
 	 */
 
-	rv = CKR_OK;
+	for (i = 0, sindex = 0; i < slot_count; i++)
+		if (! token_present || slot_list[i] != NULL)
+			ret_slot_list[sindex++] = i;
 
-	if (!token_present || id_list_count > 0) {
-		if (slot_list) {
-			if (*slot_num < (cert_slot_enabled ? 2 : 1))
-				rv = CKR_BUFFER_TOO_SMALL;
-			else {
-				slot_list[0] = TOKEN_SLOT;
-				if (cert_slot_enabled)
-					slot_list[1] = CERTIFICATE_SLOT;
-			}
+	/*
+	 * Add the cert slot if enabled, checking to make sure that we
+	 * are at the correct array position.
+	 */
+
+	if (cert_slot_enabled) {
+		if (sindex != count - 1) {
+			os_log_debug(logsys, "Internal error: sindex = %d, "
+				     "count = %d", (int) sindex, (int) count);
+			rv = CKR_GENERAL_ERROR;
+			goto out;
 		}
-		*slot_num = cert_slot_enabled ? 2 : 1;
-	} else {
-		/*
-		 * If we're here, token_present is TRUE and we have no
-		 * identities, so only return the certificate slot
-		 * (if it is enabled)
-		 */
-		if (slot_list && cert_slot_enabled) {
-			if (*slot_num < 1)
-				rv = CKR_BUFFER_TOO_SMALL;
-			else {
-				slot_list[0] = CERTIFICATE_SLOT;
-			}
-		}
-		*slot_num = cert_slot_enabled ? 1 : 0;
+		ret_slot_list[sindex] = CERTIFICATE_SLOT;
 	}
 
+
 out:
-	UNLOCK_MUTEX(id_mutex);
+	UNLOCK_MUTEX(slot_mutex);
+	*slot_num = count;
+
 	RET(C_GetSlotList, rv);
 }
 
@@ -759,15 +863,21 @@ out:
 
 CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 {
+	CK_RV rv = CKR_OK;
+
 	FUNCINITCHK(C_GetSlotInfo);
 
 	os_log_debug(logsys, "slot_id = %d, slot_info = %p", (int) slot_id,
 		     slot_info);
 
+	LOCK_MUTEX(slot_mutex);
+
 	CHECKSLOT(slot_id, false);
 
-	if (! slot_info)
-		RET(C_GetSlotInfo, CKR_ARGUMENTS_BAD);
+	if (! slot_info) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
 
 	/*
 	 * We can't really get any useful information out of the Security
@@ -781,27 +891,31 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 		   sizeof(slot_info->manufacturerID), "%s",
 		   "U.S. Naval Research Lab");
 
-	switch (slot_id) {
-	case TOKEN_SLOT:
-		sprintfpad(slot_info->slotDescription,
-			   sizeof(slot_info->slotDescription), "%s",
-			   id_list_count > 0 ? id_list[0].label :
-				"Keychain PKCS#11 Bridge Library Virtual Slot");
-		slot_info->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
+	/*
+	 * We've already checked for CERTIFICATE_SLOT being enabled
+	 * in the CHECKSLOT macro.
+	 */
 
-		LOCK_MUTEX(id_mutex);
-		if (id_list_count > 0)
-			slot_info->flags |= CKF_TOKEN_PRESENT;
-		UNLOCK_MUTEX(id_mutex);
-		break;
-	case CERTIFICATE_SLOT:
+	if (slot_id == CERTIFICATE_SLOT) {
 		sprintfpad(slot_info->slotDescription,
 			   sizeof(slot_info->slotDescription), "%s",
 			   "Keychain Certificates");
 		slot_info->flags = CKF_REMOVABLE_DEVICE;
 		if (atomic_load(&cert_list_status) == initialized)
 			slot_info->flags |= CKF_TOKEN_PRESENT;
-		break;
+	} else {
+		slot_info->flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
+		if (slot_list[slot_id]) {
+			sprintfpad(slot_info->slotDescription,
+				   sizeof(slot_info->slotDescription), "%s",
+				   slot_list[slot_id]->label);
+			slot_info->flags |= CKF_TOKEN_PRESENT;
+		} else {
+			sprintfpad(slot_info->slotDescription,
+				   sizeof(slot_info->slotDescription),
+				   "Keychain Bridge Library Virtual Slot #%d",
+				   (int) slot_id);
+		}
 	}
 
 	slot_info->hardwareVersion.major = 1;
@@ -809,7 +923,9 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 	slot_info->firmwareVersion.major = 1;
 	slot_info->firmwareVersion.minor = 0;
 
-	RET(C_GetSlotInfo, CKR_OK);
+out:
+	UNLOCK_MUTEX(slot_mutex);
+	RET(C_GetSlotInfo, rv);
 }
 
 /*
@@ -819,15 +935,21 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO_PTR slot_info)
 
 CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 {
+	CK_RV rv = CKR_OK;
+
 	FUNCINITCHK(C_GetTokenInfo);
 
 	os_log_debug(logsys, "slot_id = %d, token_info = %p", (int) slot_id,
 		     token_info);
 
+	LOCK_MUTEX(slot_mutex);
+
 	CHECKSLOT(slot_id, true);
 
-	if (! token_info)
-		RET(C_GetTokenInfo, CKR_ARGUMENTS_BAD);
+	if (! token_info) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
 
 	/*
 	 * We can't do any administrative operations, really, from the
@@ -838,8 +960,15 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 			    CKF_USER_PIN_INITIALIZED |
 			    CKF_TOKEN_INITIALIZED;
 
-	switch (slot_id) {
-	case TOKEN_SLOT:
+	/*
+	 * Again, we can only have a slot_id == CERTIFICATE_SLOT if
+	 * the CHECKSLOT macro says we have it enabled.
+	 */
+
+	if (slot_id == CERTIFICATE_SLOT) {
+		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
+			   "Keychain Certificates");
+	} else {
 		/*
 		 * Since this is used as label in a number of places to display
 		 * to the user, make it something useful.  Pick the first
@@ -847,12 +976,12 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 		 * summary as the token label.
 		 */
 
-		LOCK_MUTEX(id_mutex);
+		LOCK_MUTEX(slot_list[slot_id]->entry_mutex);
 
 		CFStringRef summary;
 		char *label;
 
-		summary = SecCertificateCopySubjectSummary(id_list[0].cert);
+		summary = SecCertificateCopySubjectSummary(slot_list[slot_id]->id_list[0]->cert);
 
 		if (summary) {
 			label = getstrcopy(summary);
@@ -867,7 +996,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 		if (summary)
 			CFRelease(summary);
 
-		UNLOCK_MUTEX(id_mutex);
+		UNLOCK_MUTEX(slot_list[slot_id]->entry_mutex);
 
 		token_info->flags |= CKF_LOGIN_REQUIRED;
 
@@ -885,13 +1014,6 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 				     "CKF_PROTECTED_AUTHENTICATION_PATH");
 			token_info->flags |= CKF_PROTECTED_AUTHENTICATION_PATH;
 		}
-
-		break;
-
-	case CERTIFICATE_SLOT:
-		sprintfpad(token_info->label, sizeof(token_info->label), "%s",
-			   "Keychain Certificates");
-		break;
 	}
 
 	sprintfpad(token_info->manufacturerID,
@@ -919,7 +1041,9 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO_PTR token_info)
 	sprintfpad(token_info->utcTime, sizeof(token_info->utcTime),
 		   "%s", "1970010100000000");
 
-	RET(C_GetTokenInfo, CKR_OK);
+out:
+	UNLOCK_MUTEX(slot_mutex);
+	RET(C_GetTokenInfo, rv);
 }
 
 /*
@@ -936,7 +1060,9 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 	os_log_debug(logsys, "slot_id = %lu, mechlist = %p, mechnum = %lu",
 		     slot_id, mechlist, *mechnum);
 
+	LOCK_MUTEX(slot_mutex);
 	CHECKSLOT(slot_id, true);
+	UNLOCK_MUTEX(slot_mutex);
 
 	/*
 	 * It's hard to know exactly what all mechanisms are supported by
@@ -985,7 +1111,9 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
 	os_log_debug(logsys, "slot_id = %lu, mechtype = %s, mechinfo = %p",
 		     slot_id, getCKMName(mechtype), mechinfo);
 
+	LOCK_MUTEX(slot_mutex);
 	CHECKSLOT(slot_id, true);
+	UNLOCK_MUTEX(slot_mutex);
 
 	for (i = 0; i < keychain_mechmap_size; i++) {
 		if (mechtype == keychain_mechmap[i].cki_mech) {
@@ -1020,10 +1148,13 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 		     "notify_callback = %p, session_handle = %p", (int) slot_id,
 		     flags, app_callback, notify_callback, session);
 
+	LOCK_MUTEX(slot_mutex);
 	CHECKSLOT(slot_id, true);
 
-	if (! (flags & CKF_SERIAL_SESSION))
+	if (! (flags & CKF_SERIAL_SESSION)) {
+		UNLOCK_MUTEX(slot_mutex);
 		RET(C_OpenSession, CKR_SESSION_PARALLEL_NOT_SUPPORTED);
+	}
 
 	sess = malloc(sizeof(*sess));
 	CREATE_MUTEX(sess->mutex);
@@ -1033,12 +1164,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	 * true hardware slot or the certificate hardware slot.
 	 */
 
-	switch (slot_id) {
-	case TOKEN_SLOT:
-		sess->obj_list = id_obj_list;
-		sess->obj_list_count = id_obj_count;
-		break;
-	case CERTIFICATE_SLOT:
+	if (slot_id == CERTIFICATE_SLOT) {
 		if (atomic_load(&cert_list_status) == initialized) {
 			sess->obj_list = cert_obj_list;
 			sess->obj_list_count = cert_obj_count;
@@ -1046,15 +1172,19 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 			sess->obj_list = NULL;
 			sess->obj_list_count = 0;;
 		}
-		break;
+	} else {
+		sess->obj_list = slot_list[slot_id]->obj_list;
+		sess->obj_list_count = slot_list[slot_id]->obj_count;
 	}
 
 	sess->slot_id = slot_id;
+	sess->token = slot_list[slot_id];
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
 	sess->state = NO_PENDING;
 	sess->key = NULL;
 	sess->mdc = NULL;
+	sess->token->refcount++;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1088,6 +1218,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 	*session = ++sess_list_count;
 out:
 	UNLOCK_MUTEX(sess_mutex);
+	UNLOCK_MUTEX(slot_mutex);
 
 	RET(C_OpenSession, CKR_OK);
 }
@@ -1106,15 +1237,17 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
 
+	token_logout(se->token);
+
 	sess_free(se);
 
 	sess_list[session] = NULL;
 
+#if 0
 	for (i = 0; i < sess_list_count; i++)
 		if (sess_list[i] != NULL)
 			goto cont;
-
-	token_logout();
+#endif
 
 cont:
 	UNLOCK_MUTEX(sess_mutex);
@@ -1130,7 +1263,7 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
 	sess_list_free();
-	token_logout();
+	token_logout(slot_list[slot_id]);
 	UNLOCK_MUTEX(sess_mutex);
 	UNLOCK_MUTEX(id_mutex);
 
@@ -1153,7 +1286,7 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
 	session_info->slotID = se->slot_id;
-	session_info->state = logged_in ? CKS_RO_USER_FUNCTIONS :
+	session_info->state = se->token->logged_in ? CKS_RO_USER_FUNCTIONS :
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
 	session_info->ulDeviceError = 0;
@@ -1199,22 +1332,24 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		 * return success.
 		 */
 
-		if (! lacontext) {
+		if (! se->token->lacontext) {
 			os_log_debug(logsys, "localauth context is NULL, "
 				     "cannot set PIN, skipping");
 			goto out;
 		}
 
-		for (i = 0; i < id_list_count; i++) {
+		for (i = 0; i < se->token->id_count; i++) {
 			enum la_keyusage usage;
 
-			os_log_debug(logsys, "Setting PIN for identity %d", i);
+			os_log_debug(logsys, "Setting PIN for identity %d, "
+				     "slot %d", i, (int) se->slot_id);
 
-			usage = id_list[i].privcansign ? USAGE_SIGN :
-								USAGE_DECRYPT;
+			usage = se->token->id_list[i]->privcansign ?
+						USAGE_SIGN : USAGE_DECRYPT;
 
-			if ((rv = lacontext_auth(lacontext, pin, pinlen,
-						 id_list[i].secaccess,
+			if ((rv = lacontext_auth(se->token->lacontext, pin,
+						 pinlen,
+						 se->token->id_list[i]->secaccess,
 						 usage)) != CKR_OK) {
 				/*
 				 * The real error should have been logged
@@ -1227,7 +1362,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		os_log_debug(logsys, "We are NOT setting the PIN");
 	}
 
-	logged_in = true;
+	se->token->logged_in = true;
 
 out:
 	UNLOCK_MUTEX(se->mutex);
@@ -1252,7 +1387,7 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	token_logout();
+	token_logout(se->token);
 
 	UNLOCK_MUTEX(se->mutex);
 	UNLOCK_MUTEX(id_mutex);
@@ -1540,7 +1675,7 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
-	se->key = id_list[se->obj_list[object].id_index].pubkey;
+	se->key = se->obj_list[object].id->pubkey;
 	CFRetain(se->key);
 
 	if (mm->blocksize_out)
@@ -1714,7 +1849,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
-	if (! id_list[se->obj_list[key].id_index].privcandecrypt) {
+	if (! se->obj_list[key].id->privcandecrypt) {
 		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
 		goto out;
 	}
@@ -1739,7 +1874,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
-	se->key = id_list[se->obj_list[key].id_index].privkey;
+	se->key = se->obj_list[key].id->privkey;
 	CFRetain(se->key);
 
 	if (mm->blocksize_out)
@@ -1914,7 +2049,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
-	if (! id_list[se->obj_list[object].id_index].privcansign) {
+	if (! se->obj_list[object].id->privcansign) {
 		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
 	}
 
@@ -1952,7 +2087,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
-	se->key = id_list[se->obj_list[object].id_index].privkey;
+	se->key = se->obj_list[object].id->privkey;
 	CFRetain(se->key);
 
 	if (mm->blocksize_out) {
@@ -2357,7 +2492,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 		
-	if (! id_list[se->obj_list[key].id_index].pubcanverify) {
+	if (! se->obj_list[key].id->pubcanverify) {
 		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
 		goto out;
 	}
@@ -2391,7 +2526,7 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
-	se->key = id_list[se->obj_list[key].id_index].pubkey;
+	se->key = se->obj_list[key].id->pubkey;
 	CFRetain(se->key);
 
 	if (mm->blocksize_out) {
@@ -2610,25 +2745,26 @@ NOTSUPPORTED(C_WaitForSlotEvent, (CK_SESSION_HANDLE session, CK_SLOT_ID_PTR slot
  *
  * So, how does this work?
  *
- * We call SecItemCopyMatching() to find any "identities" known by the
- * Security framework.  An identity is a private key with a matching
- * certificate.  We restrict the search to tokens that live on smartcards.
- * Returns -1 on failure, 0 on success.
+ * What we USED to do was call SecItemCopyMatching() to find all identities
+ * that matched a hardware token and glom them into one "slot".  But that
+ * had some limitations.
  *
- * Should be called with id_mutex locked.
+ * The new way is we get called at token insertion time as part of the
+ * TKTokenWatcher callback with a specific token identifier.  We try to
+ * add all of the token identities at that time.
  */ 
 
-static int
-scan_identities(void)
+void
+add_token_id(CFStringRef tokenid)
 {
 	CFMutableDictionaryRef query = NULL;
 	CFTypeRef result = NULL;
 	unsigned int i, count;
-	int ret = 0;
+	OSStatus ret;
+	struct slot_entry *token;
 
 	/*
-	 * Our keys to create our query dictionary; note that the order
-	 * keys and values need to match up.
+	 * Our keys to create our query dictionary.
 	 *
 	 * Here's what's the query dictionary means:
 	 *
@@ -2647,6 +2783,10 @@ scan_identities(void)
 	 *	documented very well, but I see that the security tool
 	 *	"list-smartcards" command uses this so I feel it's pretty
 	 *	safe to rely on this search key for now.
+	 * kSecAttrTokenID = token identifier
+	 *	This will limit the search to hardware tokens which match
+	 *	this specific token identifier.  The token identifier
+	 *	we use comes from the TKTokenWatcher insertion handler.
 	 * kSecReturnPersistentRef = kCFBooleanTrue
 	 *	This means return a "persisistent" reference to the identity
 	 *      (in a CFDataRef).  In earlier versions we would use
@@ -2672,7 +2812,8 @@ scan_identities(void)
 	 * Whew.
 	 */
 
-	os_log_debug(logsys, "Performing identity scan");
+	os_log_debug(logsys, "Looking for identities for token "
+		     "%{public}@", tokenid);
 
 	/*
 	 * Create the query dictionary for SecCopyItemMatching(); see above.
@@ -2680,9 +2821,10 @@ scan_identities(void)
 	 */
 
 	if (! add_dict(&query, kSecClass, kSecClassIdentity))
-		return -1;
+		return;
 	add_dict(&query, kSecMatchLimit, kSecMatchLimitAll);
 	add_dict(&query, kSecAttrAccessGroup, kSecAttrAccessGroupToken);
+	add_dict(&query, kSecAttrTokenID, tokenid);
 	add_dict(&query, kSecReturnPersistentRef, kCFBooleanTrue);
 	add_dict(&query, kSecReturnAttributes, kCFBooleanTrue);
 
@@ -2695,126 +2837,102 @@ scan_identities(void)
 	CFRelease(query);
 
 	/*
-	 * It turns out that to detect card insertions/removals, we need
-	 * to change things a bit (we used to scan for identities only once).
-	 * So here's what we do now; perform the following tests:
-	 *
-	 * Do we have the same number of identities?
-	 * Do we have the same public key hashes?
-	 *
-	 * If this is all the same, then we return.  Otherwise we perform
-	 * a full rescan.
+	 * If we get an error, then just return and don't create
+	 * this token.
 	 */
 
 	if (ret) {
 		/*
 		 * Handle the case where we just don't see any matching
-		 * results.
+		 * results.  Which is really identical to the "error"
+		 * case as well.
 		 */
 
 		if (ret == errSecItemNotFound) {
 			os_log_debug(logsys, "No identities found");
-
-			id_list_init = true;
-
-			/*
-			 * If this is the same as before?  If so, then
-			 * just return here
-			 */
-
-			if (id_list_count == 0) {
-				return 0;
-			} else {
-				os_log_debug(logsys, "We now have no "
-					     "identities (previously had %u)",
-					     id_list_count);
-				count = 0;
-				goto rebuild;
-			}
 		} else {
 			LOG_SEC_ERR("SecItemCopyMatching failed: "
 				    "%{public}@", ret);
-			return -1;
 		}
+		goto out;
 	}
-
-	/*
-	 * Check to see if we have the same number of entries
-	 * and the same public key hashes.
-	 *
-	 * Because right now we compare each entry in order to
-	 * the corresponding entry in id_list, we will trigger a
-	 * rescan if the identity order varies; as far as I can
-	 * tell this doesn't happen, but we'll need to fix that
-	 * in the future if it does.
-	 */
 
 	count = cflistcount(result);
 
-	if (count != id_list_count) {
-		os_log_debug(logsys, "We have %u identities, previously we "
-			     "had %u", count, id_list_count);
-		goto rebuild;
-	}
-
-	for (i = 0; i < count; i++) {
-		CFDictionaryRef dict;
-		CFDataRef data;
-
-		dict = cfgetindex(result, i);
-
-		if (CFDictionaryGetValueIfPresent(dict, kSecAttrPublicKeyHash,
-						  (const void **) &data)) {
-			if (!CFEqual(data, id_list[i].pkeyhash)) {
-				os_log_debug(logsys, "public key hash for "
-					     "identity %u differs", i + 1);
-				goto rebuild;
-			}
-		}
-	}
-
-	os_log_debug(logsys, "Identity inventory unchanged");
-
-	goto out;
-
 	/*
-	 * Clear out all previous identity entries and object tree
+	 * Allocate our slot entry now and allocate a new
+	 * LocalAuthentication context for it.
 	 */
 
-rebuild:
-	os_log_debug(logsys, "Rebuilding identity list and object tree");
+	token = malloc(sizeof(*token));
 
-	obj_free(&id_obj_list, &id_obj_count, &id_obj_size);
-	id_list_free();
+	memset(token, 0, sizeof(*token));
 
-	if (lacontext != NULL)
-		lacontext_free(lacontext);
-
-	lacontext = lacontext_new();
+	token->tokenid = tokenid;
+	CFRetain(token->tokenid);
+	token->id_list = NULL;
+	token->id_count = 0;
+	token->id_size = 0;
+	token->logged_in = false;
+	token->label = NULL;
+	token->lacontext = lacontext_new();
+	CREATE_MUTEX(token->entry_mutex);
+	token->refcount = 1;
 
 	os_log_debug(logsys, "%u identities found", count);
 
 	for (i = 0; i < count; i++)  {
 		os_log_debug(logsys, "Copying identity %u", i + 1);
 
-		if (add_identity(cfgetindex(result, i))) {
-			ret = -1;
-			goto out;
-		}
+		if (add_identity(token, cfgetindex(result, i)) == -1)
+			os_log_debug(logsys, "Adding identity %u "
+				     "failed", i + 1);
 	}
 
 	/*
-	 * Rebuild our object tree since we've finished the identity scan
+	 * If we didn't have any identities added, then this token
+	 * isn't valid.  Just free it.
 	 */
 
-	build_id_objects(0);
+	if (token->id_count == 0) {
+		os_log_debug(logsys, "No identities added, not creating token");
+		slot_entry_free(token);
+		goto out;
+	}
 
-	id_list_init = true;
+	/*
+	 * Build the objects for these identities
+	 */
+
+	build_id_objects(token);
+
+	/*
+	 * Now that we have a valid entry, time to add it to our slot list.
+	 * See if we have an open slot list entry.  If not, then make our
+	 * slot list a little bigger and add one
+	 */
+
+	LOCK_MUTEX(slot_mutex);
+	for (i = 0; i < slot_count; i++) {
+		if (slot_list[i] == NULL) {
+			goto got_slot;
+		}
+	}
+
+	slot_count++;
+
+	slot_list = realloc(slot_list, sizeof(*slot_list) * slot_count);
+
+got_slot:
+	os_log_debug(logsys, "Adding new token at slot %u", i);
+	slot_list[i] = token;
+
+	UNLOCK_MUTEX(slot_mutex);
 
 out:
 	if (result)
 		CFRelease(result);
-	return ret;
+	return;
 }
 
 /*
@@ -2823,7 +2941,7 @@ out:
  */
 
 static int
-add_identity(CFDictionaryRef dict)
+add_identity(struct slot_entry *entry, CFDictionaryRef dict)
 {
 	CFStringRef label;
 	CFNumberRef keytype;
@@ -2832,7 +2950,7 @@ add_identity(CFDictionaryRef dict)
 	CFDictionaryRef keydict;
 	CFDataRef p_ref;
 	OSStatus ret;
-	int i = id_list_count;
+	struct id_info *id;
 
 	/*
 	 * Just in case ...
@@ -2842,23 +2960,6 @@ add_identity(CFDictionaryRef dict)
 		os_log_debug(logsys, "Identity dictionary is NULL, returning!");
 		return -1;
 	}
-
-	/*
-	 * If we don't have enough id entries, allocate some more.
-	 */
-
-	if (++id_list_count > id_list_size) {
-		id_list_size += 5;
-		id_list = realloc(id_list, sizeof(*id_list) * id_list_size);
-	}
-
-	id_list[i].ident = NULL;
-	id_list[i].cert = NULL;
-	id_list[i].privkey = NULL;
-	id_list[i].pubkey = NULL;
-	id_list[i].label = NULL;
-	id_list[i].secaccess = NULL;
-	id_list[i].pkeyhash = NULL;
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecValuePersistentRef,
 					    (const void **)&p_ref)) {
@@ -2931,8 +3032,9 @@ add_identity(CFDictionaryRef dict)
 	 * the query dictionary.
 	 */
 
-	if (lacontext)
-		add_dict(&refquery, kSecUseAuthenticationContext, lacontext);
+	if (entry->lacontext)
+		add_dict(&refquery, kSecUseAuthenticationContext,
+			 entry->lacontext);
 
 	ret = SecItemCopyMatching(refquery, &refresult);
 
@@ -2950,12 +3052,23 @@ add_identity(CFDictionaryRef dict)
 		return -1;
 	}
 
+	id = malloc(sizeof(*id));
+	memset(id, 0, sizeof(*id));
+
+	id->ident = NULL;
+	id->cert = NULL;
+	id->privkey = NULL;
+	id->pubkey = NULL;
+	id->label = NULL;
+	id->secaccess = NULL;
+	id->pkeyhash = NULL;
+
 	/*
 	 * No need to retain; we own this as a result of it coming out of
 	 * SecItemCopyMatching
 	 */
 
-	id_list[i].ident = (SecIdentityRef) refresult;
+	id->ident = (SecIdentityRef) refresult;
 
 	/*
 	 * Extract out of the dictionary all of the things we need.
@@ -2977,75 +3090,54 @@ add_identity(CFDictionaryRef dict)
 
 	if (CFDictionaryGetValueIfPresent(dict, kSecAttrLabel,
 					  (const void **) &label)) {
-		id_list[i].label = getstrcopy(label);
+		id->label = getstrcopy(label);
 		os_log_debug(logsys, "Identity label: %{public}@", label);
 	} else {
-		id_list[i].label = strdup("Hardware token");
+		id->label = strdup("Hardware token");
 		os_log_debug(logsys, "No label, using default");
 	}
 	
-#if 0
-	if (! CFDictionaryGetValueIfPresent(dict, kSecValueRef,
-					    (const void **)&id_list[i].ident)) {
-		os_log_debug(logsys, "Identity reference not found");
-		return -1;
-	}
-
-	CFRetain(id_list[i].ident);
-#endif
-
-#if 0
-	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrAccessControl,
-				    (const void **) &id_list[i].secaccess)) {
-		os_log_debug(logsys, "Access Control object not found");
-		return -1;
-	}
-
-	CFRetain(id_list[i].secaccess);
-#endif
-
 	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrKeyType,
 					    (const void **) &keytype)) {
 		os_log_debug(logsys, "Key type not found");
-		return -1;
+		ret = -1;
+		goto out;
 	}
 
-	id_list[i].keytype = convert_keytype(keytype);
+	id->keytype = convert_keytype(keytype);
 
 	if (! CFDictionaryGetValueIfPresent(dict, kSecAttrPublicKeyHash,
-					    (const void **)
-							&id_list[i].pkeyhash)) {
+					    (const void **) &id->pkeyhash)) {
 		os_log_debug(logsys, "Public key hash not found");
-		return -1;
+		ret = -1;
+		goto out;
 	}
 
-	CFRetain(id_list[i].pkeyhash);
+	CFRetain(id->pkeyhash);
 
-	id_list[i].privcansign = boolfromdict("Can-Sign", dict,
-					      kSecAttrCanSign);
-	id_list[i].privcandecrypt = boolfromdict("Can-Decrypt", dict,
-						 kSecAttrCanDecrypt);
+	id->privcansign = boolfromdict("Can-Sign", dict, kSecAttrCanSign);
+	id->privcandecrypt = boolfromdict("Can-Decrypt", dict,
+					  kSecAttrCanDecrypt);
 
-	ret = SecIdentityCopyCertificate(id_list[i].ident, &id_list[i].cert);
+	ret = SecIdentityCopyCertificate(id->ident, &id->cert);
 
 	if (ret)
 		LOG_SEC_ERR("CopyCertificate failed: %{public}@", ret);
 
 	if (! ret) {
-		ret = SecIdentityCopyPrivateKey(id_list[i].ident,
-						&id_list[i].privkey);
+		ret = SecIdentityCopyPrivateKey(id->ident, &id->privkey);
 		if (ret)
 			LOG_SEC_ERR("CopyPrivateKey failed: %{public}@", ret);
 		else {
-			if (! (id_list[i].secaccess =
-					getaccesscontrol(dict)))
-				return -1;
+			if (! (id->secaccess = getaccesscontrol(dict))) {
+				ret = -1;
+				goto out;
+			}
 		}
 	}
 
 	if ( !ret) {
-		ret = SecCertificateCopyPublicKey(id_list[i].cert,
-						  &id_list[i].pubkey);
+		ret = SecCertificateCopyPublicKey(id->cert, &id->pubkey);
 		if (ret)
 			LOG_SEC_ERR("CopyPublicKey failed: %{public}@", ret);
 	}
@@ -3055,14 +3147,14 @@ add_identity(CFDictionaryRef dict)
 	 */
 
 	if (! ret) {
-		keydict = SecKeyCopyAttributes(id_list[i].pubkey);
+		keydict = SecKeyCopyAttributes(id->pubkey);
 
-		id_list[i].pubcanverify = boolfromdict("Can-Verify", keydict,
-						        kSecAttrCanVerify);
-		id_list[i].pubcanencrypt = boolfromdict("Can-Encrypt", keydict,
-							kSecAttrCanEncrypt);
-		id_list[i].pubcanwrap = boolfromdict("Can-Wrap", keydict,
-						     kSecAttrCanWrap);
+		id->pubcanverify = boolfromdict("Can-Verify", keydict,
+						kSecAttrCanVerify);
+		id->pubcanencrypt = boolfromdict("Can-Encrypt", keydict,
+						 kSecAttrCanEncrypt);
+		id->pubcanwrap = boolfromdict("Can-Wrap", keydict,
+					      kSecAttrCanWrap);
 		/*
 		 * We're going to cheat here JUST a bit.  It turns out
 		 * if a public key is set to allow wrapping, it can also
@@ -3070,16 +3162,41 @@ add_identity(CFDictionaryRef dict)
 		 * set encryption.
 		 */
 
-		if (id_list[i].pubcanwrap)
-			id_list[i].pubcanencrypt = true;
+		if (id->pubcanwrap)
+			id->pubcanencrypt = true;
 
 		CFRelease(keydict);
 	}
 
-	if (ret)
+out:
+	if (ret) {
+		id_info_free(id);
 		return -1;
+	}
+
+	/*
+	 * If we don't have enough id entries, allocate some more.
+	 */
+
+	if (++entry->id_count > entry->id_size) {
+		entry->id_size += 5;
+		entry->id_list = realloc(entry->id_list,
+					 sizeof(*(entry->id_list)) *
+					 		entry->id_size);
+	}
+
+	entry->id_list[entry->id_count - 1] = id;
 
 	return 0;
+}
+
+/*
+ * Remove a token from a slot
+ */
+
+void
+remove_token_id(CFStringRef tokenid)
+{
 }
 
 /*
@@ -3905,36 +4022,72 @@ log_init(void *context)
 }
 
 /*
+ * Free a slot entry
+ */
+
+static void
+slot_entry_free(struct slot_entry *entry)
+{
+	if (--entry->refcount > 0)
+		return;
+
+	if (entry->tokenid)
+		CFRelease(entry->tokenid);
+
+	if (entry->id_list)
+		id_list_free(entry->id_list, entry->id_count);
+
+	if (entry->label)
+		free(entry->label);
+
+	if (entry->lacontext)
+		lacontext_free(entry->lacontext);
+
+	DESTROY_MUTEX(entry->entry_mutex);
+
+	free(entry);
+}
+
+/*
  * Free our identity list
  */
 
 static void
-id_list_free(void)
+id_list_free(struct id_info **id_list, unsigned int id_list_count)
 {
 	int i;
 
-	for (i = 0; i < id_list_count; i++) {
-		if (id_list[i].label)
-			free(id_list[i].label);
-		if (id_list[i].ident)
-			CFRelease(id_list[i].ident);
-		if (id_list[i].privkey)
-			CFRelease(id_list[i].privkey);
-		if (id_list[i].pubkey)
-			CFRelease(id_list[i].pubkey);
-		if (id_list[i].cert)
-			CFRelease(id_list[i].cert);
-		if (id_list[i].secaccess)
-			CFRelease(id_list[i].secaccess);
-		if (id_list[i].pkeyhash)
-			CFRelease(id_list[i].pkeyhash);
-	}
+	for (i = 0; i < id_list_count; i++)
+		if (id_list[i])
+			id_info_free(id_list[i]);
 
 	if (id_list)
 		free(id_list);
+}
 
-	id_list = NULL;
-	id_list_count = id_list_size = 0;
+/*
+ * Free a single identity entry
+ */
+
+static void
+id_info_free(struct id_info *id)
+{
+	if (id->label)
+		free(id->label);
+	if (id->ident)
+		CFRelease(id->ident);
+	if (id->privkey)
+		CFRelease(id->privkey);
+	if (id->pubkey)
+		CFRelease(id->pubkey);
+	if (id->cert)
+		CFRelease(id->cert);
+	if (id->secaccess)
+		CFRelease(id->secaccess);
+	if (id->pkeyhash)
+		CFRelease(id->pkeyhash);
+
+	free(id);
 }
 
 /*
@@ -4112,38 +4265,39 @@ convert_keytype(CFNumberRef type)
  * Build our list of objects based on our identities
  */
 
-#define ADD_ATTR_SIZE(name, attribute, var, size) \
+#define ADD_ATTR_SIZE(objlist, objcount, attribute, var, size) \
 do { \
 	void *p = malloc(size); \
 	memcpy(p, var, size); \
-	if ( name ## _obj_list[ name ## _obj_count ].attr_count >= \
-	    name ## _obj_list[ name ## _obj_count ].attr_size) { \
-		name ## _obj_list[ name ## _obj_count ].attr_size += 5; \
-		name ## _obj_list[ name ## _obj_count ].attrs = realloc( name ## _obj_list[ name ## _obj_count ].attrs, \
-			name ## _obj_list[ name ## _obj_count ].attr_size * sizeof(CK_ATTRIBUTE)); \
+	if ( objlist [ objcount ].attr_count >= \
+	    objlist [ objcount ].attr_size) { \
+		objlist [ objcount ].attr_size += 5; \
+		objlist [ objcount ].attrs = realloc( objlist [ objcount ].attrs, \
+			objlist [ objcount ].attr_size * sizeof(CK_ATTRIBUTE)); \
 	} \
-	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count].attr_count].type = attribute; \
-	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count].attr_count].pValue = p; \
-	name ## _obj_list[ name ## _obj_count ].attrs[ name ## _obj_list[ name ## _obj_count ].attr_count].ulValueLen = size; \
-	name ## _obj_list[ name ## _obj_count ].attr_count++; \
+	objlist [ objcount ].attrs[ objlist [ objcount ].attr_count].type = attribute; \
+	objlist [ objcount ].attrs[ objlist [ objcount ].attr_count].pValue = p; \
+	objlist [ objcount ].attrs[ objlist [ objcount ].attr_count].ulValueLen = size; \
+	objlist [ objcount ].attr_count++; \
 } while (0)
 
-#define ADD_ATTR(name, attr, var) ADD_ATTR_SIZE(name, attr, &var, sizeof(var))
+#define ADD_ATTR(objlist, objcount, attr, var) \
+		ADD_ATTR_SIZE(objlist, objcount, attr, &var, sizeof(var))
 
-#define NEW_OBJECT(name) \
+#define NEW_OBJECT(objlist, objcount, objsize) \
 do { \
-	if (++ name ## _obj_count >= name ## _obj_size) { \
-		name ## _obj_size += 5; \
-		name ## _obj_list = realloc( name ## _obj_list, name ## _obj_size * sizeof(* name ## _obj_list )); \
+	if (++ objcount >= objsize ) { \
+		objsize += 5; \
+		objlist = realloc( objlist, objsize * sizeof(* objlist )); \
 	} \
 } while (0)
 
-#define OBJINIT(name) \
+#define OBJINIT(objlist, objcount, idptr) \
 do { \
-	name ## _obj_list[ name ## _obj_count ].id_index = i; \
-	name ## _obj_list[ name ## _obj_count ].attrs = NULL; \
-	name ## _obj_list[ name ## _obj_count ].attr_count = 0; \
-	name ## _obj_list[ name ## _obj_count ].attr_size = 0; \
+	objlist [ objcount ].id = idptr; \
+	objlist [ objcount ].attrs = NULL; \
+	objlist [ objcount ].attr_count = 0; \
+	objlist [ objcount ].attr_size = 0; \
 } while (0)
 
 /*
@@ -4151,7 +4305,7 @@ do { \
  */
 
 static void
-build_id_objects(int lock)
+build_id_objects(struct slot_entry *entry)
 {
 	int i;
 	CK_OBJECT_CLASS cl;
@@ -4161,24 +4315,22 @@ build_id_objects(int lock)
 	CFDataRef d;
 	char *label;
 
-	if (lock)
-		LOCK_MUTEX(id_mutex);
 
-	if (id_list_count > 0) {
+	if (entry->id_count > 0) {
 		/* Prime the pump */
-		NEW_OBJECT(id);
-		id_obj_count--;
+		NEW_OBJECT(entry->obj_list, entry->obj_count, entry->obj_size);
+		entry->obj_count--;
 	}
 
-	for (i = 0; i < id_list_count; i++) {
-		SecCertificateRef cert = id_list[i].cert;
+	for (i = 0; i < entry->id_count; i++) {
+		SecCertificateRef cert = entry->id_list[i]->cert;
 		CFDataRef subject = NULL, issuer = NULL, serial = NULL;
 		CFDataRef keydata = NULL, modulus = NULL, exponent = NULL;
 		CFErrorRef error;
 		unsigned char *objid = NULL;
 		unsigned int objidlen;
 
-		OBJINIT(id);
+		OBJINIT(entry->obj_list, entry->obj_count, entry->id_list[i]);
 
 		/*
 		 * Add in the object for each identity; cert, public key,
@@ -4188,50 +4340,57 @@ build_id_objects(int lock)
 		get_index_bytes(i, &objid, &objidlen);
 
 		cl = CKO_CERTIFICATE;
-		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(id, CKA_CLASS, cl);
-		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
-		ADD_ATTR(id, CKA_CERTIFICATE_TYPE, ct);
+		entry->obj_list[entry->obj_count].class = cl;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_CLASS, cl);
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_ID,
+			      objid, objidlen);
+		ADD_ATTR(entry->obj_list, entry->obj_count,
+			 CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
-		ADD_ATTR(id, CKA_TOKEN, b);
-		ADD_ATTR_SIZE(id, CKA_LABEL, id_list[i].label,
-			      strlen(id_list[i].label));
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_TOKEN, b);
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_LABEL,
+			      entry->id_list[i]->label,
+			      strlen(entry->id_list[i]->label));
 		d = SecCertificateCopyData(cert);
-		ADD_ATTR_SIZE(id, CKA_VALUE, CFDataGetBytePtr(d),
-			      CFDataGetLength(d));
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_VALUE,
+			      CFDataGetBytePtr(d), CFDataGetLength(d));
 		get_certificate_info(d, &serial, &issuer, &subject);
 		CFRelease(d);
 
 		if (subject)
-			ADD_ATTR_SIZE(id, CKA_SUBJECT,
-				      CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_SUBJECT, CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 		if (issuer)
-			ADD_ATTR_SIZE(id, CKA_ISSUER, CFDataGetBytePtr(issuer),
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_ISSUER, CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
 		if (serial)
-			ADD_ATTR_SIZE(id, CKA_SERIAL_NUMBER,
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_SERIAL_NUMBER,
 				      CFDataGetBytePtr(serial),
 				      CFDataGetLength(serial));
 
-		NEW_OBJECT(id);
-		OBJINIT(id);
+		NEW_OBJECT(entry->obj_list, entry->obj_count, entry->obj_size);
+		OBJINIT(entry->obj_list, entry->obj_count, entry->id_list[i]);
 
 		cl = CKO_PUBLIC_KEY;
-		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(id, CKA_CLASS, cl);
-		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
-		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
+		entry->obj_list[entry->obj_count].class = cl;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_CLASS, cl);
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_ID,
+			      objid, objidlen);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_KEY_TYPE,
+			 entry->id_list[i]->keytype);
 		b = CK_TRUE;
-		ADD_ATTR(id, CKA_TOKEN, b);
-		ADD_ATTR(id, CKA_LOCAL, b);
-		b = id_list[i].pubcanencrypt;
-		ADD_ATTR(id, CKA_ENCRYPT, b);
-		b = id_list[i].pubcanverify;
-		ADD_ATTR(id, CKA_VERIFY, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_TOKEN, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_LOCAL, b);
+		b = entry->id_list[i]->pubcanencrypt;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_ENCRYPT, b);
+		b = entry->id_list[i]->pubcanverify;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_VERIFY, b);
 		if (subject)
-			ADD_ATTR_SIZE(id, CKA_SUBJECT,
-				      CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_SUBJECT, CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
 		/*
@@ -4241,13 +4400,14 @@ build_id_objects(int lock)
 		 * the identity label, and maybe check later if this
 		 * changes; keep the code around here if it does.
 		 *
-		 * label = getkeylabel(id_list[i].pubkey);
+		 * label = getkeylabel(entry->id_list[i]->pubkey);
 		 * ADD_ATTR_SIZE(id, CKA_LABEL, label, strlen(label));
 		 * free(label);
 		 */
 
-		ADD_ATTR_SIZE(id, CKA_LABEL, id_list[i].label,
-			      strlen(id_list[i].label));
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_LABEL,
+			      entry->id_list[i]->label,
+			      strlen(entry->id_list[i]->label));
 
 		/*
 		 * It turns out some implementations want CKA_MODULUS_BITS,
@@ -4258,18 +4418,22 @@ build_id_objects(int lock)
 		 * size is returned in bytes, and we need bits.
 		 */
 
-		t = SecKeyGetBlockSize(id_list[i].pubkey) * 8;
-		ADD_ATTR(id, CKA_MODULUS_BITS, t);
+		t = SecKeyGetBlockSize(entry->id_list[i]->pubkey) * 8;
+		ADD_ATTR(entry->obj_list, entry->obj_count,
+			 CKA_MODULUS_BITS, t);
 
-		keydata = SecKeyCopyExternalRepresentation(id_list[i].pubkey,
+		keydata = SecKeyCopyExternalRepresentation(entry->id_list[i]->pubkey,
 							   &error);
 
 		if (keydata) {
 			if (get_pubkey_info(keydata, &modulus, &exponent)) {
-				ADD_ATTR_SIZE(id, CKA_MODULUS,
+				ADD_ATTR_SIZE(entry->obj_list,
+					      entry->obj_count, CKA_MODULUS,
 					      CFDataGetBytePtr(modulus),
 					      CFDataGetLength(modulus));
-				ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
+				ADD_ATTR_SIZE(entry->obj_list,
+					      entry->obj_count,
+					      CKA_PUBLIC_EXPONENT,
 					      CFDataGetBytePtr(exponent),
 					      CFDataGetLength(exponent));
 			}
@@ -4280,31 +4444,34 @@ build_id_objects(int lock)
 		}
 
 		b = CK_FALSE;
-		ADD_ATTR(id, CKA_WRAP, b);
-		ADD_ATTR(id, CKA_DERIVE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_WRAP, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_DERIVE, b);
 
-		NEW_OBJECT(id);
-		OBJINIT(id);
+		NEW_OBJECT(entry->obj_list, entry->obj_count, entry->obj_size);
+		OBJINIT(entry->obj_list, entry->obj_count, entry->id_list[i]);
 
 		cl = CKO_PRIVATE_KEY;
-		id_obj_list[id_obj_count].class = cl;
-		ADD_ATTR(id, CKA_CLASS, cl);
-		ADD_ATTR_SIZE(id, CKA_ID, objid, objidlen);
-		ADD_ATTR(id, CKA_KEY_TYPE, id_list[i].keytype);
+		entry->obj_list[entry->obj_count].class = cl;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_CLASS, cl);
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_ID,
+			      objid, objidlen);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_KEY_TYPE,
+			 entry->id_list[i]->keytype);
 		b = CK_TRUE;
-		ADD_ATTR(id, CKA_TOKEN, b);
-		ADD_ATTR(id, CKA_PRIVATE, b);
-		b = id_list[i].privcandecrypt;
-		ADD_ATTR(id, CKA_DECRYPT, b);
-		b = id_list[i].privcansign;
-		ADD_ATTR(id, CKA_SIGN, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_TOKEN, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_PRIVATE, b);
+		b = entry->id_list[i]->privcandecrypt;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_DECRYPT, b);
+		b = entry->id_list[i]->privcansign;
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_SIGN, b);
 		if (subject)
-			ADD_ATTR_SIZE(id, CKA_SUBJECT,
-				      CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_SUBJECT, CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 
-		label = getkeylabel(id_list[i].privkey);
-		ADD_ATTR_SIZE(id, CKA_LABEL, label, strlen(label));
+		label = getkeylabel(entry->id_list[i]->privkey);
+		ADD_ATTR_SIZE(entry->obj_list, entry->obj_count, CKA_LABEL,
+			      label, strlen(label));
 		free(label);
 
 		/*
@@ -4314,26 +4481,30 @@ build_id_objects(int lock)
 		 */
 
 		if (keydata) {
-			ADD_ATTR_SIZE(id, CKA_MODULUS,
-				      CFDataGetBytePtr(modulus),
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_MODULUS, CFDataGetBytePtr(modulus),
 				      CFDataGetLength(modulus));
-			ADD_ATTR_SIZE(id, CKA_PUBLIC_EXPONENT,
+			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+				      CKA_PUBLIC_EXPONENT,
 				      CFDataGetBytePtr(exponent),
 				      CFDataGetLength(exponent));
 		}
 
 		b = CK_TRUE;
-		ADD_ATTR(id, CKA_SENSITIVE, b);
-		ADD_ATTR(id, CKA_ALWAYS_SENSITIVE, b);
-		ADD_ATTR(id, CKA_NEVER_EXTRACTABLE, b);
-		ADD_ATTR(id, CKA_LOCAL, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_SENSITIVE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count,
+			 CKA_ALWAYS_SENSITIVE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count,
+			 CKA_NEVER_EXTRACTABLE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_LOCAL, b);
 		b = CK_FALSE;
-		ADD_ATTR(id, CKA_ALWAYS_AUTHENTICATE, b);
-		ADD_ATTR(id, CKA_UNWRAP, b);
-		ADD_ATTR(id, CKA_DERIVE, b);
-		ADD_ATTR(id, CKA_EXTRACTABLE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count,
+			 CKA_ALWAYS_AUTHENTICATE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_UNWRAP, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_DERIVE, b);
+		ADD_ATTR(entry->obj_list, entry->obj_count, CKA_EXTRACTABLE, b);
 
-		NEW_OBJECT(id);
+		NEW_OBJECT(entry->obj_list, entry->obj_count, entry->obj_size);
 
 		if (objid)
 			free(objid);
@@ -4352,9 +4523,6 @@ build_id_objects(int lock)
 		if (exponent)
 			CFRelease(exponent);
 	}
-
-	if (lock)
-		UNLOCK_MUTEX(id_mutex);
 }
 
 /*
@@ -4373,7 +4541,7 @@ build_cert_objects(void)
 
 	if (cert_list_count > 0) {
 		/* Prime the pump */
-		NEW_OBJECT(cert);
+		NEW_OBJECT(cert_obj_list, cert_obj_count, cert_obj_size);
 		cert_obj_count--;
 	}
 
@@ -4388,34 +4556,36 @@ build_cert_objects(void)
 		unsigned char *objid = NULL;
 		unsigned int objidlen;
 
-		OBJINIT(cert);
+		OBJINIT(cert_obj_list, cert_obj_count, NULL);
 
 		/*
 		 * Add in an object for each certificate.
 		 */
 
-		/* offset so no collision */
-		get_index_bytes(i + 0xff00, &objid, &objidlen);
+		get_index_bytes(i, &objid, &objidlen);
 
 		cl = CKO_CERTIFICATE;
 		cert_obj_list[cert_obj_count].class = cl;
-		ADD_ATTR(cert, CKA_CLASS, cl);
-		ADD_ATTR_SIZE(cert, CKA_ID, objid, objidlen);
-		ADD_ATTR(cert, CKA_CERTIFICATE_TYPE, ct);
+		ADD_ATTR(cert_obj_list, cert_obj_count, CKA_CLASS, cl);
+		ADD_ATTR_SIZE(cert_obj_list, cert_obj_count, CKA_ID, objid,
+			      objidlen);
+		ADD_ATTR(cert_obj_list, cert_obj_count,
+			 CKA_CERTIFICATE_TYPE, ct);
 		b = CK_TRUE;
-		ADD_ATTR(cert, CKA_TOKEN, b);
+		ADD_ATTR(cert_obj_list, cert_obj_count, CKA_TOKEN, b);
 
 		subjstr = SecCertificateCopySubjectSummary(cert_list[i].cert);
 		subjc = getstrcopy(subjstr);
 
-		ADD_ATTR_SIZE(cert, CKA_LABEL, subjc, strlen(subjc));
+		ADD_ATTR_SIZE(cert_obj_list, cert_obj_count, CKA_LABEL,
+			      subjc, strlen(subjc));
 
 		free(subjc);
 		CFRelease(subjstr);
 
 		d = SecCertificateCopyData(cert);
-		ADD_ATTR_SIZE(cert, CKA_VALUE, CFDataGetBytePtr(d),
-			      CFDataGetLength(d));
+		ADD_ATTR_SIZE(cert_obj_list, cert_obj_count, CKA_VALUE,
+			      CFDataGetBytePtr(d), CFDataGetLength(d));
 		get_certificate_info(d, &serial, &issuer, &subject);
 
 		if (cc_md_init(CKM_SHA_1, &mdc)) {
@@ -4427,37 +4597,40 @@ build_cert_objects(void)
 		CFRelease(d);
 
 		if (subject)
-			ADD_ATTR_SIZE(cert, CKA_SUBJECT,
-				      CFDataGetBytePtr(subject),
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count,
+				      CKA_SUBJECT, CFDataGetBytePtr(subject),
 				      CFDataGetLength(subject));
 		if (issuer)
-			ADD_ATTR_SIZE(cert, CKA_ISSUER,
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count, CKA_ISSUER,
 				      CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
 		if (serial)
-			ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER,
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count,
+				      CKA_SERIAL_NUMBER,
 				      CFDataGetBytePtr(serial),
 				      CFDataGetLength(serial));
 
-		NEW_OBJECT(cert);
-		OBJINIT(cert);
+		NEW_OBJECT(cert_obj_list, cert_obj_count, cert_obj_size);
+		OBJINIT(cert_obj_list, cert_obj_count, NULL);
 
 		cl = CKO_NSS_TRUST;
 		cert_obj_list[cert_obj_count].class = cl;
-		ADD_ATTR(cert, CKA_CLASS, cl);
+		ADD_ATTR(cert_obj_list, cert_obj_count, CKA_CLASS, cl);
 		b = CK_TRUE;
-		ADD_ATTR(cert, CKA_TOKEN, b);
+		ADD_ATTR(cert_obj_list, cert_obj_count, CKA_TOKEN, b);
 
 		if (issuer)
-			ADD_ATTR_SIZE(cert, CKA_ISSUER,
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count, CKA_ISSUER,
 				      CFDataGetBytePtr(issuer),
 				      CFDataGetLength(issuer));
 		if (serial)
-			ADD_ATTR_SIZE(cert, CKA_SERIAL_NUMBER,
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count,
+				      CKA_SERIAL_NUMBER,
 				      CFDataGetBytePtr(serial),
 				      CFDataGetLength(serial));
 		if (hash)
-			ADD_ATTR_SIZE(cert, CKA_CERT_SHA1_HASH, hash, hashlen);
+			ADD_ATTR_SIZE(cert_obj_list, cert_obj_count,
+				      CKA_CERT_SHA1_HASH, hash, hashlen);
 
 		/*
 		 * As far as I can tell, CAs should have these various
@@ -4466,16 +4639,21 @@ build_cert_objects(void)
 		 */
 
 		if (is_cert_ca(cert)) {
-			ADD_ATTR(cert, CKA_TRUST_SERVER_AUTH, trust);
-			ADD_ATTR(cert, CKA_TRUST_CLIENT_AUTH, trust);
-			ADD_ATTR(cert, CKA_TRUST_EMAIL_PROTECTION, trust);
-			ADD_ATTR(cert, CKA_TRUST_CODE_SIGNING, trust);
+			ADD_ATTR(cert_obj_list, cert_obj_count,
+				 CKA_TRUST_SERVER_AUTH, trust);
+			ADD_ATTR(cert_obj_list, cert_obj_count,
+				 CKA_TRUST_CLIENT_AUTH, trust);
+			ADD_ATTR(cert_obj_list, cert_obj_count,
+				 CKA_TRUST_EMAIL_PROTECTION, trust);
+			ADD_ATTR(cert_obj_list, cert_obj_count,
+				 CKA_TRUST_CODE_SIGNING, trust);
 #if 0
-			ADD_ATTR(cert, CKA_TRUST_STEP_UP_APPROVED, trust);
+			ADD_ATTR(cert_obj_list, cert_obj_count,
+				 CKA_TRUST_STEP_UP_APPROVED, trust);
 #endif
 		}
 
-		NEW_OBJECT(cert);
+		NEW_OBJECT(cert_obj_list, cert_obj_count, cert_obj_size);
 
 		if (objid)
 			free(objid);
@@ -5100,15 +5278,16 @@ sess_list_free(void)
  */
 
 static void
-token_logout(void)
+token_logout(struct slot_entry *token)
 {
 	/*
-	 * Log out from all identities; since we now share a lacontext
-	 * across identities, we only need to do this once.
+	 * Log out from all identities on a single token; since we
+	 * now share a lacontext across identities, we only need to
+	 * do this once.
 	 */
 
-	if (lacontext)
-		lacontext_logout(lacontext);
+	if (token->lacontext)
+		lacontext_logout(token->lacontext);
 
-	logged_in = false;
+	token->logged_in = false;
 }

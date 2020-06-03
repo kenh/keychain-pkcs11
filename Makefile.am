@@ -17,6 +17,7 @@ keychain_pkcs11_la_SOURCES = \
 			src/debug.c \
 			src/tables.c \
 			src/localauth.m \
+			src/tokenwatcher.m \
 			src/certutil.c \
 			src/ccglue.c \
 			include/debug.h \
@@ -39,6 +40,7 @@ keychain_pkcs11_la_LDFLAGS = \
 			-shrext ".dylib" \
 			-framework Security \
 			-framework LocalAuthentication \
+			-framework CryptoTokenKit \
 			#
 
 ##

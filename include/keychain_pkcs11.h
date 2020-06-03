@@ -32,4 +32,16 @@ do { \
 
 extern void logtype(const char *, CFTypeRef);
 
+/*
+ * Add a token to the master slot list
+ */
+
+extern void add_token_id(CFStringRef tokendid);
+
+/*
+ * Remove a token from the master slot list
+ */
+
+extern void remove_token_id(CFStringRef tokenid);
+
 #endif /* __KEYCHAIN_PKCS11_H__ */
