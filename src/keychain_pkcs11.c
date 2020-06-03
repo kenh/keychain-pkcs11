@@ -1226,7 +1226,6 @@ out:
 CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 {
 	struct session *se;
-	int i;
 
 	FUNCINITCHK(C_CloseSession);
 
@@ -1247,9 +1246,9 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 	for (i = 0; i < sess_list_count; i++)
 		if (sess_list[i] != NULL)
 			goto cont;
-#endif
 
 cont:
+#endif
 	UNLOCK_MUTEX(sess_mutex);
 	UNLOCK_MUTEX(id_mutex);
 
