@@ -1255,7 +1255,7 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 {
 	int i;
 
-	FUNCINITCHK(C_CloseSession);
+	FUNCINITCHK(C_CloseAllSessions);
 
 	os_log_debug(logsys, "slot_id = %d", (int) slot_id);
 
