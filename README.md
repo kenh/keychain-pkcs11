@@ -28,13 +28,16 @@ with Apple-provided APIs.
 
 ## Getting Started
 
-Currently Keychain-PKCS11 is considered &ldquo;beta quality&rdquo;, but is
-available either via a package file, or you can compile it yourself.
-For MacOS X Installer packages see the
-[releases](https://github.com/kenh/keychain-pkcs11/releases)
-page on Github.  Currently the Installer packages are unsigned so you will
-have to open them from the Terminal or use System Preferences to
-&ldquo;Open Anyway&rdquo;.
+Currently Keychain-PKCS11 is considered &ldquo;beta quality&rdquo;,
+but is available either via a standard MacOS X Installer package or
+you can compile it yourself.  For MacOS X Installer packages see the
+[releases](https://github.com/kenh/keychain-pkcs11/releases) page on
+Github.  The Installer packages are signed and notarized and should work
+on any MacOS X system from High Sierra up to and including Catalina.
+
+If you wish to use the pre-built Installer package, go to the
+[releases](https://github.com/kenh/keychain-pkcs11/releases) page and
+select the desired version.  The latest release is always recommended.
 
 If you wish the compile the package from source, see **Prerequisites**
 and **Installing** below.
@@ -139,9 +142,14 @@ change using **defaults(1)**; see **keychain-pkcs11(8)**.
 
 ## Caveats
 
-Currently Keychain-PKCS11 supports most commonly used PKCS#11
-cryptographic functions, including `C_Sign`, `C_Verify`,
-`C_Encrypt`, and `C_Decrypt`.  Other functions may be added in the future.
+Currently Keychain-PKCS11 supports almost all PKCS#11
+cryptographic functions, including `C_Sign`, 'C_SignUpdate', `C_Verify`,
+'C_VerifyUpdate', `C_Encrypt`, and `C_Decrypt`.  In addition to the
+basic PKCS #1 v1.5 RSA mechanism (**CKM_RSA_PKCS**), it also supports
+the OAEP mechanisms for encryption/decryption and the PSS mechanisms for
+signing/verification.  Note that arbitrary OAEP and PSS mechanism parameters
+are NOT supported, due to limitations of the Apple Security framework, but
+commonly used parameters should work.
 
 By default Keychain-PKCS11 will return the `CKF_PROTECTED_AUTHENTICATION_PATH`
 flag in the token information structure to indicate that the PIN should NOT
