@@ -176,7 +176,6 @@ do { \
 	} \
 } while (0)
 
-static kc_mutex id_mutex;
 static kc_mutex sess_mutex;
 
 /*
@@ -217,7 +216,7 @@ struct slot_entry {
 /* These should get filled in at library start-up time */
 static struct slot_entry **slot_list = NULL;
 static unsigned int slot_count = 0;
-static void slot_entry_free(struct slot_entry *);
+static void slot_entry_free(struct slot_entry *, bool);
 
 /*
  * Our list of identities that is stored on our smartcard
@@ -370,7 +369,6 @@ static struct session **sess_list = NULL;	/* Yes, array of pointers */
 static unsigned int sess_list_count = 0;
 static unsigned int sess_list_size = 0;
 static void sess_free(struct session *);
-static void sess_list_free(void);
 
 /*
  * Return CKR_SESSION_HANDLE_INVALID if we don't have a valid session
@@ -601,7 +599,6 @@ CK_RV C_Initialize(CK_VOID_PTR p)
 	}
 
 	CREATE_MUTEX(slot_mutex);
-	CREATE_MUTEX(id_mutex);
 	CREATE_MUTEX(sess_mutex);
 
 	/*
@@ -716,7 +713,7 @@ CK_RV C_Finalize(CK_VOID_PTR p)
 
 	for (i = 0; i < slot_count; i++)
 		if (slot_list[i])
-			slot_entry_free(slot_list[i]);
+			slot_entry_free(slot_list[i], true);
 
 	free(slot_list);
 
@@ -1172,19 +1169,22 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags,
 			sess->obj_list = NULL;
 			sess->obj_list_count = 0;;
 		}
+		sess->token = NULL;
 	} else {
 		sess->obj_list = slot_list[slot_id]->obj_list;
 		sess->obj_list_count = slot_list[slot_id]->obj_count;
+		sess->token = slot_list[slot_id];
+		LOCK_MUTEX(sess->token->entry_mutex);
+		sess->token->refcount++;
+		UNLOCK_MUTEX(sess->token->entry_mutex);
 	}
 
 	sess->slot_id = slot_id;
-	sess->token = slot_list[slot_id];
 	sess->search_attrs = NULL;
 	sess->search_attrs_count = 0;
 	sess->state = NO_PENDING;
 	sess->key = NULL;
 	sess->mdc = NULL;
-	sess->token->refcount++;
 
 	LOCK_MUTEX(sess_mutex);
 
@@ -1233,10 +1233,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(sess_mutex);
-
-	token_logout(se->token);
 
 	sess_free(se);
 
@@ -1250,21 +1247,32 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 cont:
 #endif
 	UNLOCK_MUTEX(sess_mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_CloseSession, CKR_OK);
 }
 
 CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 {
-	CHECKSLOT(slot_id, true);
+	int i;
 
-	LOCK_MUTEX(id_mutex);
+	LOCK_MUTEX(slot_mutex);
+	CHECKSLOT(slot_id, true);
+	UNLOCK_MUTEX(slot_mutex);
+
 	LOCK_MUTEX(sess_mutex);
-	sess_list_free();
-	token_logout(slot_list[slot_id]);
+
+	/*
+	 * Only close sessions assigned to this slot
+	 */
+
+	for (i = 0; i < sess_list_count; i++) {
+		if (sess_list[i]->slot_id == slot_id) {
+			sess_free(sess_list[i]);
+			sess_list[i] = NULL;
+		}
+	}
+
 	UNLOCK_MUTEX(sess_mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_CloseAllSessions, CKR_OK);
 }
@@ -1314,8 +1322,15 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
+
+	/*
+	 * If we don't have a token associated with this slot, then
+	 * just pretend we succeed.
+	 */
+
+	if (! se->token)
+		goto out;
 
 	/*
          * I went back and forth here; I finally decided that if a PIN
@@ -1323,6 +1338,8 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
          * use the same PIN for all private keys; that seems a safe
          * assumption for now
 	 */
+
+	LOCK_MUTEX(se->token->entry_mutex);
 
 	if (pin) {
 		/*
@@ -1334,6 +1351,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		if (! se->token->lacontext) {
 			os_log_debug(logsys, "localauth context is NULL, "
 				     "cannot set PIN, skipping");
+			UNLOCK_MUTEX(se->token->entry_mutex);
 			goto out;
 		}
 
@@ -1354,6 +1372,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 				 * The real error should have been logged
 				 * in lacontext_auth().
 				 */
+				UNLOCK_MUTEX(se->token->entry_mutex);
 				goto out;
 			}
 		}
@@ -1362,10 +1381,10 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 	}
 
 	se->token->logged_in = true;
+	UNLOCK_MUTEX(se->token->entry_mutex);
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Login, rv);
 }
@@ -1383,13 +1402,17 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
-	token_logout(se->token);
+	if (! se->token)
+		goto out;
 
+	LOCK_MUTEX(se->token->entry_mutex);
+	token_logout(se->token);
+	UNLOCK_MUTEX(se->token->entry_mutex);
+
+out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 	RET(C_Logout, CKR_OK);
 }
 
@@ -1603,7 +1626,6 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (! mech) {
@@ -1685,8 +1707,10 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
+	LOCK_MUTEX(se->token->entry_mutex);
 	se->key = se->obj_list[object].id->pubkey;
 	CFRetain(se->key);
+	UNLOCK_MUTEX(se->token->entry_mutex);
 
 	if (mm->blocksize_out)
 		se->outsize = SecKeyGetBlockSize(se->key);
@@ -1697,7 +1721,6 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_EncryptInit, rv);
 }
@@ -1741,7 +1764,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 		if (! se->outsize) {
 			/* Hmm, what to do here?  No idea! */
 			UNLOCK_MUTEX(se->mutex);
-			UNLOCK_MUTEX(id_mutex);
 			RET(C_Encrypt, CKR_BUFFER_TOO_SMALL);
 		}
 		*outdatalen = se->outsize;
@@ -1822,7 +1844,6 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (! mech) {
@@ -1889,8 +1910,10 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
+	LOCK_MUTEX(se->token->entry_mutex);
 	se->key = se->obj_list[key].id->privkey;
 	CFRetain(se->key);
+	UNLOCK_MUTEX(se->token->entry_mutex);
 
 	if (mm->blocksize_out)
 		se->outsize = SecKeyGetBlockSize(se->key);
@@ -1901,7 +1924,6 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_DecryptInit, rv);
 }
@@ -2044,7 +2066,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	/*
@@ -2108,8 +2129,10 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	if (se->key)
 		CFRelease(se->key);
 
+	LOCK_MUTEX(se->token->entry_mutex);
 	se->key = se->obj_list[object].id->privkey;
 	CFRetain(se->key);
+	UNLOCK_MUTEX(se->token->entry_mutex);
 
 	if (mm->blocksize_out) {
 		se->outsize = SecKeyGetBlockSize(se->key);
@@ -2121,7 +2144,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_SignInit, rv);
 }
@@ -2148,7 +2170,6 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 #ifdef KEYCHAIN_DEBUG
@@ -2213,7 +2234,6 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 			     "%{public}@", err);
 		CFRelease(err);
 		UNLOCK_MUTEX(se->mutex);
-		UNLOCK_MUTEX(id_mutex);
 		RET(C_Sign, CKR_GENERAL_ERROR);
 	}
 
@@ -2250,7 +2270,6 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Sign, rv);
 }
@@ -2272,7 +2291,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	/*
@@ -2334,7 +2352,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_SignUpdate, rv);
 }
@@ -2360,7 +2377,6 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	/*
@@ -2471,7 +2487,6 @@ outfinish:
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_SignFinal, rv);
 }
@@ -2493,7 +2508,6 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	/*
@@ -2565,7 +2579,6 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_VerifyInit, rv);
 }
@@ -2586,7 +2599,6 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (se->state != V_INIT) {
@@ -2619,7 +2631,6 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_Verify, rv);
 }
@@ -2637,7 +2648,6 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	/*
@@ -2681,7 +2691,6 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 out:
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_VerifyUpdate, rv);
 }
@@ -2704,7 +2713,6 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(id_mutex);
 	LOCK_MUTEX(se->mutex);
 
 	if (se->state != V_UPDATE) {
@@ -2744,7 +2752,6 @@ out:
 		free(digest);
 
 	UNLOCK_MUTEX(se->mutex);
-	UNLOCK_MUTEX(id_mutex);
 
 	RET(C_VerifyFinal, rv);
 }
@@ -2922,7 +2929,7 @@ add_token_id(CFStringRef tokenid)
 
 	if (token->id_count == 0) {
 		os_log_debug(logsys, "No identities added, not creating token");
-		slot_entry_free(token);
+		slot_entry_free(token, false);
 		goto out;
 	}
 
@@ -3230,6 +3237,32 @@ out:
 void
 remove_token_id(CFStringRef tokenid)
 {
+	int i;
+
+	os_log_debug(logsys, "Received removal event for token %{public}@",
+		     tokenid);
+
+	LOCK_MUTEX(slot_mutex);
+
+	/*
+	 * Go through the list and remove whatever token we match on.
+	 * Because we're doing refcounting we shouldn't free any memory
+	 * that is being used by a session.
+	 */
+
+	for (i = 0; i < slot_count; i++) {
+		if (CFEqual(tokenid, slot_list[i]->tokenid)) {
+			os_log_debug(logsys, "Removing token from slot %d", i);
+			slot_entry_free(slot_list[i], false);
+			slot_list[i] = NULL;
+			break;
+		}
+	}
+
+	if (i == slot_count)
+		os_log_debug(logsys, "No matching slot found for token!");
+
+	UNLOCK_MUTEX(slot_mutex);
 }
 
 /*
@@ -3997,10 +4030,28 @@ log_init(void *context)
  */
 
 static void
-slot_entry_free(struct slot_entry *entry)
+slot_entry_free(struct slot_entry *entry, bool logout)
 {
-	if (--entry->refcount > 0)
+	os_log_debug(logsys, "slot_entry_free for slot %{public}@ "
+		    "(refcount %d)", entry->tokenid, (int) entry->refcount);
+
+	LOCK_MUTEX(entry->entry_mutex);
+
+	if (--entry->refcount > 0) {
+		/*
+		 * If refcount == 1, that means there are no more open
+                 * sessions (assuming we didn't have an open session and
+                 * our card got removed).  So if logout == true (called
+                 * be C_CloseSession or similar functions) then logout
+                 * of the token as well.
+		 *
+		 * If the refcount == 0 then the lacontext is completety
+		 * released which does the same thing.
+		 */
+		if (entry->refcount == 1)
+			token_logout(entry);
 		return;
+	}
 
 	if (entry->tokenid)
 		CFRelease(entry->tokenid);
@@ -4014,6 +4065,7 @@ slot_entry_free(struct slot_entry *entry)
 	if (entry->lacontext)
 		lacontext_free(entry->lacontext);
 
+	UNLOCK_MUTEX(entry->entry_mutex);
 	DESTROY_MUTEX(entry->entry_mutex);
 
 	free(entry);
@@ -5219,29 +5271,12 @@ sess_free(struct session *se)
 		free(digest);
 	}
 
+	if (se->token)
+		slot_entry_free(se->token, true);
+
 	UNLOCK_MUTEX(se->mutex);
 	DESTROY_MUTEX(se->mutex);
 	free(se);
-}
-
-/*
- * Free all sessions; call with sess_mutex locked.
- */
-
-static void
-sess_list_free(void)
-{
-	int i;
-
-	for (i = 0; i < sess_list_count; i++)
-		if (sess_list[i])
-			sess_free(sess_list[i]);
-
-	sess_list_count = sess_list_size = 0;
-
-	free(sess_list);
-
-	sess_list = NULL;
 }
 
 /*
@@ -5257,8 +5292,10 @@ token_logout(struct slot_entry *token)
 	 * do this once.
 	 */
 
-	if (token->lacontext)
+	if (token->lacontext) {
 		lacontext_logout(token->lacontext);
+		token->lacontext = NULL;
+	}
 
 	token->logged_in = false;
 }
