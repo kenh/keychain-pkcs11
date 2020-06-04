@@ -5077,20 +5077,32 @@ mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 			return false;
 		}
 
-		if (encalg)
+		if (encalg) {
 			*encalg = mechmap->sec_encmech ?
 					*mechmap->sec_encmech : NULL;
+			os_log_debug(logsys, "Encryption algorithm chosen: "
+				     "%{public}@", *encalg);
+		}
 
-		if (signalg)
+		if (signalg) {
 			*signalg = mechmap->sec_signmech ?
 					*mechmap->sec_signmech : NULL;
+			os_log_debug(logsys, "Signing algorithm chosen: "
+				     "%{public}@", *signalg);
+		}
 
-		if (dsignalg)
+		if (dsignalg) {
 			*dsignalg = mechmap->sec_dsignmech ?
 					*mechmap->sec_dsignmech : NULL;
+			os_log_debug(logsys, "Digest signing algorithm chosen: "
+				     "%{public}@", *dsignalg);
+		}
 
-		if (digest)
+		if (digest) {
 			*digest = mechmap->sec_digest;
+			os_log_debug(logsys, "Digest algorithm chosen: "
+				     "%{public}s", getCKMName(*digest));
+	}
 
 		return true;
 
@@ -5185,20 +5197,32 @@ mech_param_validate(CK_MECHANISM_PTR mptr, const struct mechanism_map *mechmap,
 	}
 
 found:
-	if (encalg)
+	if (encalg) {
 		*encalg = keychain_param_map[i].encalg ?
 					*keychain_param_map[i].encalg : NULL;
+		os_log_debug(logsys, "Encryption algorithm chosen: %{public}@",
+			     *encalg);
+	}
 
-	if (signalg)
+	if (signalg) {
 		*signalg = keychain_param_map[i].signalg ?
 					*keychain_param_map[i].signalg : NULL;
+		os_log_debug(logsys, "Signing algorithm chosen: %{public}@",
+			     *signalg);
+	}
 
-	if (dsignalg)
+	if (dsignalg) {
 		*dsignalg = keychain_param_map[i].dsignalg ?
 					*keychain_param_map[i].dsignalg : NULL;
+		os_log_debug(logsys, "Digest signing algorithm chosen: "
+			     "%{public}@", *dsignalg);
+	}
 
-	if (digest)
+	if (digest) {
 		*digest = keychain_param_map[i].hash_alg;
+		os_log_debug(logsys, "Digest algorithm chosen: %{public}s",
+			     getCKMName(*digest));
+	}
 
 	return true;
 }
