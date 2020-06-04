@@ -1255,6 +1255,10 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 {
 	int i;
 
+	FUNCINITCHK(C_CloseSession);
+
+	os_log_debug(logsys, "slot_id = %d", (int) slot_id);
+
 	LOCK_MUTEX(slot_mutex);
 	CHECKSLOT(slot_id, true);
 	UNLOCK_MUTEX(slot_mutex);
@@ -1266,7 +1270,8 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 	 */
 
 	for (i = 0; i < sess_list_count; i++) {
-		if (sess_list[i]->slot_id == slot_id) {
+		if (sess_list[i] && sess_list[i]->slot_id == slot_id) {
+			os_log_debug(logsys, "Closing session %d", i);
 			sess_free(sess_list[i]);
 			sess_list[i] = NULL;
 		}
@@ -4051,6 +4056,7 @@ slot_entry_free(struct slot_entry *entry, bool logout)
 		 */
 		if (entry->refcount == 1)
 			token_logout(entry);
+		UNLOCK_MUTEX(entry->entry_mutex);
 		return;
 	}
 
