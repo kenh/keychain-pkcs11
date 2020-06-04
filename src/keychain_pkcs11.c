@@ -1637,6 +1637,17 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 	}
 
 	/*
+	 * Make sure we actually have an identity backing this object
+	 * (certificates from the Keychain certificate slot, for example,
+	 * don't and can't actually do any crypto)
+	 */
+
+	if (! se->obj_list[object].id) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
+
+	/*
 	 * Map our mechanism to the Apple Security framework information
 	 * we need.
 	 */
@@ -1848,6 +1859,11 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
+	if (! se->obj_list[key].id) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
+
 	if (! se->obj_list[key].id->privcandecrypt) {
 		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
 		goto out;
@@ -2048,8 +2064,14 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 		goto out;
 	}
 
+	if (! se->obj_list[object].id) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
+
 	if (! se->obj_list[object].id->privcansign) {
 		rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
+		goto out;
 	}
 
 	/*
@@ -2488,6 +2510,11 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	if (key >= se->obj_list_count) {
 		rv = CKR_KEY_HANDLE_INVALID;
+		goto out;
+	}
+
+	if (! se->obj_list[key].id) {
+		rv = CKR_ARGUMENTS_BAD;
 		goto out;
 	}
 		
