@@ -31,6 +31,7 @@ keychain_pkcs11_la_SOURCES = \
 			include/pkcs11f.h \
 			include/pkcs11n.h \
 			include/pkcs11t.h \
+			include/tokenwatcher.h \
 			#
 
 keychain_pkcs11_la_LDFLAGS = \
