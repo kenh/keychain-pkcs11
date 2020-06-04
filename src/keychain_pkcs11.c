@@ -1293,7 +1293,8 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
 
 	session_info->slotID = se->slot_id;
-	session_info->state = se->token->logged_in ? CKS_RO_USER_FUNCTIONS :
+	session_info->state = (se->token && se->token->logged_in) ?
+						CKS_RO_USER_FUNCTIONS :
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
 	session_info->ulDeviceError = 0;
