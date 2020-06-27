@@ -3257,7 +3257,7 @@ remove_token_id(CFStringRef tokenid)
 	 */
 
 	for (i = 0; i < slot_count; i++) {
-		if (CFEqual(tokenid, slot_list[i]->tokenid)) {
+		if (slot_list[i] && CFEqual(tokenid, slot_list[i]->tokenid)) {
 			os_log_debug(logsys, "Removing token from slot %d", i);
 			slot_entry_free(slot_list[i], false);
 			slot_list[i] = NULL;
