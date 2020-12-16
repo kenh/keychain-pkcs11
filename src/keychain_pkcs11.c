@@ -1085,6 +1085,8 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE_PTR mechlist,
 		RET(C_GetMechanismList, CKR_BUFFER_TOO_SMALL);
 	}
 
+	*mechnum = keychain_mechmap_size;
+
 	for (i = 0; i < keychain_mechmap_size; i++)
 		mechlist[i] = keychain_mechmap[i].cki_mech;
 
