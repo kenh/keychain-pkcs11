@@ -7,6 +7,32 @@
 #include "mypkcs11.h"
 #include "tables.h"
 
+/*
+ * A special note on CKM_RSA_PKCS and CKM_RSA_X_509.
+ *
+ * These mechanisms are special in that they don't technically take
+ * arbitrary user data; it has to be formatted properly.  As a result,
+ * you shouldn't use these mechanisms unless you know exactly what you
+ * are doing.
+ *
+ * For encryption, CKM_RSA_PKCS can mostly take arbitrary data up to
+ * the key size (minus 11 bytes).  The data will be padded using
+ * PKCS #1 v1.5 block type 2.  When decrypted the padding will be removed
+ * and you will get back the original input buffer given during encryption.
+ * But for signing the input is only padded with PKCS #1 v.1 block type 1;
+ * an encoded DigestInfo structure is NOT generated.  So the input for
+ * signing should be a properly encoded DigestInfo structure with the
+ * appropriate digest algorithm OID and message.  For signature verification
+ * things work the same way: the passed-in buffer should be an encoded
+ * DigestInfo structure.
+ *
+ * CKM_RSA_X_509 is basically the "raw" RSA operations; the input buffer
+ * is treated as most-sigificant-byte first integer and the appropriate
+ * RSA operation is performed on this integer.  This can be used as a
+ * building block for other RSA mechanisms, but should not be used directly
+ * without some form of padding applied to the input buffer.
+ */
+
 const struct mechanism_map keychain_mechmap[] = {
 	{
 	  CKM_RSA_PKCS, 1024, 8192,
@@ -111,6 +137,15 @@ const struct mechanism_map keychain_mechmap[] = {
 	  NULL,
 	  NULL,
 	  CKM_SHA512, true,
+	},
+	{
+	  CKM_RSA_X_509, 1024, 8192,
+	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT|CKF_SIGN|CKF_VERIFY, NONE,
+	  &kSecKeyAlgorithmRSAEncryptionRaw,
+	  &kSecKeyAlgorithmRSASignatureRaw,
+	  /* &kSecKeyAlgorithmRSASignatureRaw, */
+	  NULL, 0,	/* Another special case; no digest algorithm */
+	  true,
 	},
 };
 
