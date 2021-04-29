@@ -2241,6 +2241,10 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		os_log_debug(logsys, "SecKeyCreateSignature failed: "
 			     "%{public}@", err);
 		CFRelease(err);
+		CFRelease(se->key);
+		se->key = NULL;
+		se->outsize = 0;
+		se->state = NO_PENDING;
 		UNLOCK_MUTEX(se->mutex);
 		RET(C_Sign, CKR_GENERAL_ERROR);
 	}
