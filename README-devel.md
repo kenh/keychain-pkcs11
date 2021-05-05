@@ -49,6 +49,30 @@ in your target installation directory). You
 can change the install location by using the `--prefix` option to `configure`.
 See `configure --help` for more information.
 
+For reference, I build the distribution using the following configure line:
+
+```
+% ./configure 'CC=xcrun -sdk macosx11.1 clang' 'OBJC=xcrun -sdk macosx11.1 clang' 'CFLAGS=-mmacosx-version-min=10.13 -arch x86_64 -arch arm64 -Wall -O2' 'OBJCFLAGS=-mmacosx-version-min=10.13 -arch x86_64 -arch arm64 -O2 -Wall'
+```
+
+The distribution Makefile also supports the following special targets:
+
+- `product` - Generate a product archive using the distribution
+  files in the `packaging` directory.  If there is a code signing identity
+  found by Autoconf in the keychain, that will be used to sign the
+  product archive.  Note that you will need both a Developer ID Application and
+  a Developer ID Installer code signing identity to properly
+  sign the product archive.  (The Application identity is used to sign
+  the actual library, where the Installer is used to sign the product archive).
+- `notarize` - This takes a product archive created by the `product` target
+  and submits to the Apple notarization service.  To make this work you
+  will need to have an app-specific password registered for your developer
+  account.  You will need to pass the notarization userid and notarization
+  password in via the `NOTARIZATION_ID` and `NOTARIZATION_PW` configure
+  variables.  See `altool(1)` for the options available for `NOTARIZATION_PW`.
+  If notarization is successful, this target will also staple the notarization
+  ticket to the product archive.
+
 ## General source code layout
 
 - `keychain-pkcs11.c` - The main driver for Keychain-PKCS#11.  It contains all
