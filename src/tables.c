@@ -138,11 +138,15 @@ const struct mechanism_map keychain_mechmap[] = {
 	  NULL,
 	  CKM_SHA512, true,
 	},
+	/*
+	 * How frustrating; it seems that the Security framework simply
+	 * doesn't support raw signatures!
+	 */
 	{
 	  CKM_RSA_X_509, 1024, 8192,
-	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT|CKF_SIGN|CKF_VERIFY, NONE,
+	  CKF_HW|CKF_ENCRYPT|CKF_DECRYPT /* |CKF_SIGN|CKF_VERIFY */, NONE,
 	  &kSecKeyAlgorithmRSAEncryptionRaw,
-	  &kSecKeyAlgorithmRSASignatureRaw,
+	  /* &kSecKeyAlgorithmRSASignatureRaw */ NULL,
 	  /* &kSecKeyAlgorithmRSASignatureRaw, */
 	  NULL, 0,	/* Another special case; no digest algorithm */
 	  true,
