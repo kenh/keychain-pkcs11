@@ -78,6 +78,8 @@ pktest_CFLAGS = $(AM_CFLAGS)
 
 EXTRA_DIST = \
 	README.md \
+	README-devel.md \
+	DEBUGGING.md \
 	packaging/resources/readme.rtf \
 	packaging/resources/conclusion.rtf \
 	#
