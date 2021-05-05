@@ -26,150 +26,87 @@ Keychain-PKCS11 is implemented with modern APIs that are all supported
 currently on Sierra, with an eye towards long-term compatibiity
 with Apple-provided APIs.
 
-## Getting Started
+Currently Keychain-PKCS11 has been tested with:
 
-Currently Keychain-PKCS11 is considered &ldquo;beta quality&rdquo;,
-but is available either via a standard MacOS X Installer package or
-you can compile it yourself.  For MacOS X Installer packages see the
-[releases](https://github.com/kenh/keychain-pkcs11/releases) page on
-Github.  The Installer packages are signed and notarized and should work
-on any MacOS X system from High Sierra up to and including Catalina.
+- Firefox (for smartcard access to web pages).
+- Thunderbird (for smartcard-based email signing and decryption)
+- MIT Kerberos (for PKINIT support)
+- Adobe Acrobat Reader DC
+- Ssh (to use with smartcard-based RSA keys, and can serve as a replacement
+  for Apple's `ssh-keychain.dylib`).
 
-If you wish to use the pre-built Installer package, go to the
-[releases](https://github.com/kenh/keychain-pkcs11/releases) page and
-select the desired version.  The latest release is always recommended.
+## How to Use
 
-If you wish the compile the package from source, see **Prerequisites**
-and **Installing** below.
+The basic steps for getting using Keychain-PKCS11 are:
 
-### Prerequisites
+1. Install Keychain-PKCS11.  The best way to do that is via the
+   installer package, found on the
+   [GitHub release page](https://github.com/kenh/keychain-pkcs11/releases).
+   That page includes signed installer packages that should work with
+   any version of MacOS X from High Sierra onwards.
+2. Configure your applications to use Keychain-PKCS11.  The library
+   is installed in `/usr/local/lib/keychain-pkcs11.dylib`.  How each
+   application is configured unfortunately varies by application.
+   For Firefox and Thunderbird the library is configured as "Security Device"
+   under the "Privacy & Security" preference.  In general, there should
+   be some kind of configuration file or preference dialog where you
+   can give the location of a PKCS#11 module; that is where you need to
+   put the pathname of the Keychain-PKCS11 library.
 
-To compile this software, you will need EITHER Xcode or the Command Line
-Developer Tools package.  You can download Xcode from the App Store and you
-can download the Command Line Developer Tools by running the following command:
+Once your application is configured, it should just work with any available
+PIV-compliant smartcards.  There is some configuration and debugging available
+from the library; run `man keychain-pkcs11` at a Terminal prompt for
+information on how to change the library's behavior.  Also see
+[Keychain-PKCS11 debugging](https://github.com/kenh/keychain-pkcs11/blob/master/DEBUGGING.md) for more debugging tips.
 
-```
-xcode-select --install
-```
+## Technical Details
 
-If you are compiling from a Git repository instead of a distribution
-tarfile, you will **also** need the following packages:
+Keychain-PKCS11 provides a PKCS#11 interface to the Apple Security
+Framework.  It does NOT support the deprecated CDSA framework.  It
+leverages the existing Smartcard drivers that are supplied with OS X
+and does NOT implement any smartcard drivers itself.  As of this writing,
+Apple only supports Smartcards which adhere to the PIV standard and
+Smartcard readers which support the USB CCID interface.
 
-* Autoconf (at least version 2.69)
-* Automake (at least version 1.15)
-* libtool (at least version 2.4.6)
+Keychain-PKCS11 provides access to all detected Smartcards
+as a series of PKCS#11 'slots' starting at zero.  Keychain-PKCS11 can
+also optionally provide a read-only interface to existing certificates
+stored in system Keychains; see `man keychain-pkcs11` for more details.
 
-All of these packages are available via popular open-source
-package systems such as Homebrew or MacPorts.
+By default Keychain-PKCS11 will set the `CKF_PROTECTED_AUTHENTICATION_PATH`
+flag in the token information struct returned by `C_GetTokenInfo`.  This
+should notify compliant applications that PIN prompts will happen externally
+and the Security framework will cause a GUI PIN prompt when an access is made
+to a private key object.  This can be disabled on a per-application bases;
+see `man keychain-pkcs11`, specifically the information on `askPIN` for
+more information.
 
-### Installing
+Keychain-PKCS11 only supports RSA cryptosystems at this time.  The following
+PKCS#11 mechanisms are supported:
 
-If you are starting with a cloned Git repository, you will first need to
-generate the configure scripts.  This step is not necessary if you are
-using a distribution tar file.
+- CKM_RSA_PKCS
+- CKM_SHA1_RSA_PKCS, CKM_SHA224_RSA_PKCS, CKM_SHA256_RSA_PKCS,
+  CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS
+- CKM_RSA_PKCS_OAEP
+- CKM_RSA_PKCS_PSS
+- CKM_SHA1_RSA_PKCS_PSS, CKM_SHA224_RSA_PKCS_PSS, CKM_SHA256_RSA_PKCS_PSS,
+  CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512_RSA_PKCS_PSS
+- CKM_RSA_X_509 (decrypt only)
 
-```
-% ./autogen.sh
-```
+Due to limitations of the Apple Security framework, arbitrary parameters
+for OAEP and PSS cryptosystems are not supported.  For example, no
+encoding parameter is supported for OAEP, and the only salt length
+supported for PSS mechanisms is one that matches the length of the
+chosen message hash.  No multipart encryption mechanisms are supported
+at this time.
 
-Next you need to run `configure`, `make`, and `make install`.  `configure`
-can take all of the standard options supported by Autoconf.
+Sandboxed applications or programs that run in the hardended runtime enviroment
+must be granted the `com.apple.security.smartcard` entitlement to
+use Keychain-PKCS11.
 
-```
-% ./configure
-% make
-% make install
-```
-
-This will install `keychain-pkcs11.dylib`, by default in `/usr/local/lib`
-(the last step may need to be performed by root, depending on the permissions
-in your target installation directory). You
-can change the install location by using the `--prefix` option to `configure`.
-See `configure --help` for more information.
-
-### System Configuration
-
-Once you have installed `keychain-pkcs11.dylib`, simply configure your various
-applications to use this as a PKCS#11 module.  How you do that is application
-dependent.
-
-To make sure that your Smartcards are recognized by the Security framework,
-you can execute (with your Smartcard inserted into the reader):
-
-```
-% security list-smartcards
-com.apple.pivtoken:00000000000000000000000000000000
-```
-
-If you get something like the above output then it should work fine.  If
-you get `No smartcards found`, then either there is a problem with your
-reader or Smartcard, or you've disabled the Apple Smartcard framework.
-To check to see if the Apple Smartcard framework has been disabled, run
-
-```
-% security smartcards token -l
-```
-
-If you see something returned like `com.apple.CryptoTokenKit.pivtoken`, then
-that means the internal Smartcard support has been disabled.  You can
-re-enable it by running:
-
-```
-% sudo security smartcards token -e com.apple.CryptoTokenKit.pivtoken
-```
-
-Substitute the appropriate value returned by `security smartcards token -l`.
-
-## Configuration & Debugging
-
-In a perfect world, Keychain-PKCS11 should just work and you shouldn't need
-to do any debugging, but just in case ...
-
-Keychain-PKCS11 does a fair amount of logging using the Unified
-Logging support available in Sierra.  All logging is done at the `debug`
-level so by default it is not captured, but it can be selected via
-the Console application or the `log` command.  To see the debug log output
-using `log`, run:
-
-```
-% log stream --predicate 'subsystem = "mil.navy.nrl.cmf.pkcs11"' --level debug
-```
-
-This will produce a lot of output, so you may want to redirect this to a file.
-
-A man page is installed that details various different defaults you can
-change using **defaults(1)**; see **keychain-pkcs11(8)**.
-
-## Caveats
-
-Currently Keychain-PKCS11 supports almost all PKCS#11
-cryptographic functions, including `C_Sign`, 'C_SignUpdate', `C_Verify`,
-'C_VerifyUpdate', `C_Encrypt`, and `C_Decrypt`.  In addition to the
-basic PKCS #1 v1.5 RSA mechanism (**CKM_RSA_PKCS**), it also supports
-the OAEP mechanisms for encryption/decryption and the PSS mechanisms for
-signing/verification.  Note that arbitrary OAEP and PSS mechanism parameters
-are NOT supported, due to limitations of the Apple Security framework, but
-commonly used parameters should work.
-
-By default Keychain-PKCS11 will return the `CKF_PROTECTED_AUTHENTICATION_PATH`
-flag in the token information structure to indicate that the PIN should NOT
-be input by the application using `C_Login`, but instead will be entered in
-out-of-band (the Security framework will automatically bring up a dialog box
-when you go to use the private key).   But if your application is buggy
-in this regard or you prefer to have the application prompt for the PIN,
-you can configure Keychain-PKCS11 to NOT set the
-`CKF_PROTECTED_AUTHENTICATION_PATH`
-flag by changing the
-`askPIN` preference key via the following command:
-
-```
-% defaults write mil.navy.nrl.cmf.pkcs11 askPIN -array-add <appname>
-```
-
-Where `<appname>` is the name of the application (specifically, the
-value returned by the `getprogname()` function).  If you are unsure what
-that is, you can view what Keychain-PKCS11 thinks it is by viewing the
-debug log (see above).
+If you wish to build Keychain-PKCS11 from source, please read
+[README-devel](https://github.com/kenh/keychain-pkcs11/blob/master/README-devel.md)
+for more information.
 
 ## Author
 
@@ -196,5 +133,7 @@ like `SecItemCopyMatching()` which can search keychains).  I took the
 original name from KeychainToken and at the beginning I wasn't sure what
 functions were needed to make this work.  But at this point I can't
 think of a better name.  "Security-PKCS11" sounds too generic, and
-people still associate "Keychain" with Apple.  So I've decided to stick
-with the name for now.
+people still associate "Keychain" with Apple.  In theory this perhaps
+should be called "CryptoTokenKit-PKCS11", but it doesn't really call
+any CryptoTokenKit functiokns directly with the exception of the TKToken
+watcher interface.  So I've decided to stick with the current name for now.
