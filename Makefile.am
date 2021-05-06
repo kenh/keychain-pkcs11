@@ -103,7 +103,7 @@ destdir:
 	$(MAKE) install DESTDIR=$(PACKAGEBUILDDIR)
 	rm -f $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.la
 	if [ "$(APP_SIGNING_ID)" != "unknown" ]; then \
-	  $(CODESIGN) --timestamp --sign "$(APP_SIGNING_ID)" --identifier "$(APP_SIGNING_ID).keychain-pkcs11.dylib" $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.dylib; \
+	  $(CODESIGN) --timestamp --sign "$(APP_SIGNING_ID)" --identifier "$(APPIDENTIFIER).keychain-pkcs11.dylib" $(PACKAGEBUILDDIR)$(libdir)/keychain-pkcs11.dylib; \
 	fi
 
 ##
