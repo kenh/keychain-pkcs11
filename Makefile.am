@@ -163,6 +163,7 @@ notarize:
 	@UUID=`$(PLBUDDY) -c "Print :notarization-upload:RequestUUID" $(NOTARIZE_STATUS)`; \
 	  echo "Waiting for notarization status for request ID $$UUID"; \
 	  while true; do \
+	    sleep 10; \
 	    $(XCRUN) altool \
 		--notarization-info $$UUID \
 		-u "$(NOTARIZATION_ID)" \
@@ -176,7 +177,6 @@ notarize:
 	    if [ "$$STATUS" != "in progress" ]; then \
 	      break; \
 	    fi; \
-	    sleep 10; \
 	  done; \
 	  if [ "$$STATUS" != "success" ]; then \
 	    echo "Notarization failed, check $(NOTARIZE_STATUS) for more info"; \
