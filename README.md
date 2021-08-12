@@ -135,5 +135,5 @@ functions were needed to make this work.  But at this point I can't
 think of a better name.  "Security-PKCS11" sounds too generic, and
 people still associate "Keychain" with Apple.  In theory this perhaps
 should be called "CryptoTokenKit-PKCS11", but it doesn't really call
-any CryptoTokenKit functiokns directly with the exception of the TKToken
+any CryptoTokenKit functions directly with the exception of the `TKToken`
 watcher interface.  So I've decided to stick with the current name for now.
