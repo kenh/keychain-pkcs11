@@ -4517,13 +4517,15 @@ build_id_objects(struct slot_entry *entry)
 		 */
 
 		if (keydata) {
-			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
-				      CKA_MODULUS, CFDataGetBytePtr(modulus),
-				      CFDataGetLength(modulus));
-			ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
-				      CKA_PUBLIC_EXPONENT,
-				      CFDataGetBytePtr(exponent),
-				      CFDataGetLength(exponent));
+			if (modulus)
+				ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+						CKA_MODULUS, CFDataGetBytePtr(modulus),
+						CFDataGetLength(modulus));
+			if (exponent)
+				ADD_ATTR_SIZE(entry->obj_list, entry->obj_count,
+						CKA_PUBLIC_EXPONENT,
+						CFDataGetBytePtr(exponent),
+						CFDataGetLength(exponent));
 		}
 
 		b = CK_TRUE;
