@@ -151,38 +151,44 @@ notarize:
 		echo "NOTARIZATION_ID and NOTARIZATION_PW must be set for notarization support"; \
 		exit 1; \
 	fi
-	rm -f $(NOTARIZE_STATUS)
-	$(XCRUN) altool --notarize-app \
-		-u "$(NOTARIZATION_ID)" \
-		-p "$(NOTARIZATION_PW)" \
-		--asc-provider "$(ASC_PROVIDER)" \
-		--primary-bundle-id "$(APPIDENTIFIER)" \
-		--output-format xml \
-		-f $(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg \
-		> $(NOTARIZE_STATUS)
-	@UUID=`$(PLBUDDY) -c "Print :notarization-upload:RequestUUID" $(NOTARIZE_STATUS)`; \
-	  echo "Waiting for notarization status for request ID $$UUID"; \
-	  while true; do \
-	    sleep 10; \
-	    $(XCRUN) altool \
-		--notarization-info $$UUID \
-		-u "$(NOTARIZATION_ID)" \
-		-p "$(NOTARIZATION_PW)" \
-		--output-format xml > $(NOTARIZE_STATUS); \
-	    if [ $$? -ne 0 ]; then \
-	      echo "altool failed"; \
-	      exit 1; \
-	    fi; \
-	    STATUS=`$(PLBUDDY) -c "Print :notarization-info:Status" $(NOTARIZE_STATUS)`; \
-	    if [ "$$STATUS" != "in progress" ]; then \
-	      break; \
-	    fi; \
-	  done; \
-	  if [ "$$STATUS" != "success" ]; then \
-	    echo "Notarization failed, check $(NOTARIZE_STATUS) for more info"; \
-	    echo "Log file URL is: "; \
-	    $(PLBUDDY) -c "Print :notarization-info:LogFileURL" $(NOTARIZE_STATUS); \
-	    exit 1; \
-	  fi; \
-	  echo "Notarization successful"
+	$(XCRUN) notarytool submit \
+		$(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg \
+		--apple-id "$(NOTARIZATION_ID)" \
+		--keychain-profile "$(NOTARIZATION_PW)" \
+		--team-id "$(ASC_PROVIDER)" \
+		--wait
+##	rm -f $(NOTARIZE_STATUS)
+##	$(XCRUN) altool --notarize-app \
+##		-u "$(NOTARIZATION_ID)" \
+##		-p "$(NOTARIZATION_PW)" \
+##		--asc-provider "$(ASC_PROVIDER)" \
+##		--primary-bundle-id "$(APPIDENTIFIER)" \
+##		--output-format xml \
+##		-f $(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg \
+##		> $(NOTARIZE_STATUS)
+##	@UUID=`$(PLBUDDY) -c "Print :notarization-upload:RequestUUID" $(NOTARIZE_STATUS)`; \
+##	  echo "Waiting for notarization status for request ID $$UUID"; \
+##	  while true; do \
+##	    sleep 10; \
+##	    $(XCRUN) altool \
+##		--notarization-info $$UUID \
+##		-u "$(NOTARIZATION_ID)" \
+##		-p "$(NOTARIZATION_PW)" \
+##		--output-format xml > $(NOTARIZE_STATUS); \
+##	    if [ $$? -ne 0 ]; then \
+##	      echo "altool failed"; \
+##	      exit 1; \
+##	    fi; \
+##	    STATUS=`$(PLBUDDY) -c "Print :notarization-info:Status" $(NOTARIZE_STATUS)`; \
+##	    if [ "$$STATUS" != "in progress" ]; then \
+##	      break; \
+##	    fi; \
+##	  done; \
+##	  if [ "$$STATUS" != "success" ]; then \
+##	    echo "Notarization failed, check $(NOTARIZE_STATUS) for more info"; \
+##	    echo "Log file URL is: "; \
+##	    $(PLBUDDY) -c "Print :notarization-info:LogFileURL" $(NOTARIZE_STATUS); \
+##	    exit 1; \
+##	  fi; \
+##	  echo "Notarization successful"
 	$(XCRUN) stapler staple $(PACKAGE_NAME)-$(PACKAGE_VERSION).pkg

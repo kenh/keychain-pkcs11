@@ -15,15 +15,15 @@ AC_ARG_VAR([CODESIGN], [Path to codesign program])
 AC_ARG_VAR([XCRUN], [Path to xcrun program])
 AC_ARG_VAR([PKGBUILD], [Path to pkgbuild program])
 AC_ARG_VAR([PRODUCTBUILD], [Path to productbuild program])
-AC_ARG_VAR([PLBUDDY], [Path to PlistBuddy program])
+dnl AC_ARG_VAR([PLBUDDY], [Path to PlistBuddy program])
 AC_PATH_PROG([SECURITY], [security], [missing])
 AC_PATH_PROG([CODESIGN], [codesign], [missing])
 AC_PATH_PROG([XCRUN], [xcrun], [missing])
 AC_PATH_PROG([PRODUCTBUILD], [productbuild], [missing])
 AC_PATH_PROG([PRODUCTSIGN], [productsign], [missing])
 AC_PATH_PROG([PKGBUILD], [pkgbuild], [missing])
-AC_PATH_PROG([PLBUDDY], [PlistBuddy], [missing],
-	     [/usr/libexec$PATH_SEPARATOR$PATH])
+dnl AC_PATH_PROG([PLBUDDY], [PlistBuddy], [missing],
+dnl	     [/usr/libexec$PATH_SEPARATOR$PATH])
 AC_PROG_AWK
 AC_PROG_SED
 AC_PROG_GREP
