@@ -411,7 +411,7 @@ static struct certinfo *cert_list = NULL;
 static unsigned int cert_list_size = 0;
 static unsigned int cert_list_count = 0;
 enum certstate { uninitialized, initializing, initialized };
-_Atomic static enum certstate cert_list_status = ATOMIC_VAR_INIT(uninitialized);
+_Atomic static enum certstate cert_list_status = uninitialized;
 static bool cert_slot_enabled = false;
 
 static struct obj_info *cert_obj_list = NULL;	/* Cert object list */
