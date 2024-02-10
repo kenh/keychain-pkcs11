@@ -288,7 +288,7 @@ struct obj_info {
 };
 
 #define LOG_DEBUG_OBJECT(obj, se) \
-	os_log_debug(logsys, "Object %lu (%s)", obj, \
+	os_log_debug(logsys, "Object %lu (%{public}s)", obj, \
 		     getCKOName(se->obj_list[obj].class));
 
 static void build_id_objects(struct slot_entry *);
@@ -529,7 +529,7 @@ CK_RV name args { \
 
 #define RET(name, val) \
 do { \
-	os_log_debug(logsys, #name " returning %s", getCKRName(val)); \
+	os_log_debug(logsys, #name " returning %{public}s", getCKRName(val)); \
 	return val; \
 } while (0)
 
@@ -1107,8 +1107,8 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE mechtype,
 
 	FUNCINITCHK(C_GetMechanismInfo);
 
-	os_log_debug(logsys, "slot_id = %lu, mechtype = %s, mechinfo = %p",
-		     slot_id, getCKMName(mechtype), mechinfo);
+	os_log_debug(logsys, "slot_id = %lu, mechtype = %{public}s, "
+		     "mechinfo = %p", slot_id, getCKMName(mechtype), mechinfo);
 
 	LOCK_MUTEX(slot_mutex);
 	CHECKSLOT(slot_id, true);
@@ -1461,7 +1461,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 	LOG_DEBUG_OBJECT(object, se);
 
 	for (i = 0; i < count; i++) {
-		os_log_debug(logsys, "Retrieving attribute: %s",
+		os_log_debug(logsys, "Retrieving attribute: %{public}s",
 			     getCKAName(template[i].type));
 		if ((attr = find_attribute(&se->obj_list[object],
 					   template[i].type))) {
@@ -1579,7 +1579,8 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 			if (rc >= maxcount) {
 				*count = rc;
 				se->obj_search_index++;
-				os_log_debug(logsys, "Found %u object%s",
+				os_log_debug(logsys, "Found %u "
+					     "object%{public}s",
 					     rc, rc == 1 ? "" : "s");
 				UNLOCK_MUTEX(se->mutex);
 				RET(C_FindObjects, CKR_OK);
@@ -1587,7 +1588,8 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 		}
 	}
 
-	os_log_debug(logsys, "Found %u object%s", rc, rc == 1 ? "" : "s");
+	os_log_debug(logsys, "Found %u object%{public}s", rc,
+		     rc == 1 ? "" : "s");
 	*count = rc;
 
 	UNLOCK_MUTEX(se->mutex);
@@ -2069,8 +2071,9 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	FUNCINITCHK(C_SignInit);
 
-	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
-		    (int) session, getCKMName(mech->mechanism), (int) object);
+	os_log_debug(logsys, "session = %d, mechanism = %{public}s, "
+		     "object = %d", (int) session, getCKMName(mech->mechanism),
+		     (int) object);
 
 	CHECKSESSION(session, se);
 
@@ -2185,7 +2188,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		FILE *f = fopen(file, "w");
 
 		if (! f) {
-			os_log_debug(logsys, "Failed to open \"%s\": "
+			os_log_debug(logsys, "Failed to open \"%{public}s\": "
 				     "%{darwin.errno}d", file, errno);
 		} else {
 			fwrite(indata, indatalen, 1, f);
@@ -2271,7 +2274,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 		FILE *f = fopen(file, "w");
 
 		if (! f) {
-			os_log_debug(logsys, "Failed to open \"%s\": "
+			os_log_debug(logsys, "Failed to open \"%{public}s\": "
 				     "%{darwin.errno}d", file, errno);
 		} else {
 			fwrite(sig, *siglen, 1, f);
@@ -2351,7 +2354,7 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 		if (! cc_md_init(se->hash_alg, &se->mdc)) {
 			os_log_debug(logsys, "Unable to initialize digest "
-				     "function for %s",
+				     "function for %{public}s",
 				     getCKMName(se->hash_alg));
 			rv = CKR_GENERAL_ERROR;		
 			se->state = NO_PENDING;
@@ -2515,8 +2518,9 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	FUNCINITCHK(C_VerifyInit);
 
-	os_log_debug(logsys, "session = %d, mechanism = %s, object = %d",
-		    (int) session, getCKMName(mech->mechanism), (int) key);
+	os_log_debug(logsys, "session = %d, mechanism = %{public}s, "
+		     "object = %d", (int) session, getCKMName(mech->mechanism),
+		     (int) key);
 
 	CHECKSESSION(session, se);
 
@@ -2690,7 +2694,7 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 		if (! cc_md_init(se->hash_alg, &se->mdc)) {
 			os_log_debug(logsys, "Unable to initialize digest "
-				     "function for %s",
+				     "function for %{public}s",
 				     getCKMName(se->hash_alg));
 			rv = CKR_GENERAL_ERROR;		
 			se->state = NO_PENDING;
@@ -4163,19 +4167,19 @@ boolfromdict(const char *keyname, CFDictionaryRef dict, CFTypeRef key)
 	CFTypeRef val;
 
 	if (! CFDictionaryGetValueIfPresent(dict, key, &val)) {
-		os_log_debug(logsys, "No value for %s in dictionary, "
+		os_log_debug(logsys, "No value for %{public}s in dictionary, "
 			     "returning FALSE", keyname);
 		return false;
 	}
 
 	if (CFGetTypeID(val) != CFBooleanGetTypeID() &&
 	    CFGetTypeID(val) != CFNumberGetTypeID()) {
-		os_log_debug(logsys, "%s was not a boolean, but exists, so "
-			     "returning TRUE", keyname);
+		os_log_debug(logsys, "%{public}s was not a boolean, but exists,"
+			     " so returning TRUE", keyname);
 		return true;
 	}
 
-	os_log_debug(logsys, "%s is set to %{bool}d", keyname,
+	os_log_debug(logsys, "%{public}s is set to %{bool}d", keyname,
 		     CFBooleanGetValue(val));
 
 	return CFBooleanGetValue(val);
@@ -4219,7 +4223,7 @@ logtype(const char *string, CFTypeRef ref)
 	CFTypeID id = CFGetTypeID(ref);
 	CFStringRef str = CFCopyTypeIDDescription(id);
 
-	os_log_debug(logsys, "%s: %{public}@", string, str);
+	os_log_debug(logsys, "%{public}s: %{public}@", string, str);
 
 	CFRelease(str);
 }
@@ -4235,7 +4239,7 @@ dumpdict(const char *string, CFDictionaryRef dict)
 	unsigned int i, count = CFDictionaryGetCount(dict);
 	const void **keys, **values;
 
-	os_log_debug(logsys, "Dumping dictionary for %s", string);
+	os_log_debug(logsys, "Dumping dictionary for %{public}s", string);
 	os_log_debug(logsys, "Dictionary contains %u key/value pairs", count);
 
 	keys = malloc(sizeof(void *) * count);
@@ -4283,7 +4287,7 @@ convert_keytype(CFNumberRef type)
 
 	for (i = 0; keytype_map[i].keyname; i++) {
 		if (CFEqual(str, *keytype_map[i].sec_keytype)) {
-			os_log_debug(logsys, "This is a %s",
+			os_log_debug(logsys, "This is a %{public}s",
 				     keytype_map[i].keyname);
 			CFRelease(str);
 			return keytype_map[i].pkcs11_keytype;
@@ -4821,25 +4825,25 @@ dump_attribute(const char *str, CK_ATTRIBUTE_PTR attr)
 
 	switch (attr->type) {
 	case CKA_CLASS:
-		os_log_debug(logsys, "%s: CKA_CLASS: %s", str,
+		os_log_debug(logsys, "%{public}s: CKA_CLASS: %{public}s", str,
 			     getCKOName(*((CK_OBJECT_CLASS *) attr->pValue)));
 		break;
 	case CKA_SUBJECT:
 	case CKA_ISSUER:
 		cn = get_common_name(attr->pValue, attr->ulValueLen);
-		os_log_debug(logsys, "%s: %s: %{public}s", str,
+		os_log_debug(logsys, "%{public}s: %{public}s: %{public}s", str,
 			     getCKAName(attr->type), cn);
 		free(cn);
 		break;
 	case CKA_TOKEN:
-		os_log_debug(logsys, "%s: %s: %{bool}d", str,
+		os_log_debug(logsys, "%{public}s: %{public}s: %{bool}d", str,
 			     getCKAName(attr->type),
 			     (int) ((unsigned char *) attr->pValue)[0]);
 		break;
 	default:
-		os_log_debug(logsys, "%s: %s, len = %lu, val = %p", str,
-			     getCKAName(attr->type), attr->ulValueLen,
-					attr->pValue);
+		os_log_debug(logsys, "%{public}s: %{public}s, len = %lu, "
+			     "val = %p", str, getCKAName(attr->type),
+			     attr->ulValueLen, attr->pValue);
 	}
 }
 
