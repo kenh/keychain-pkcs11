@@ -11,6 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include
 lib_LTLIBRARIES = keychain-pkcs11.la
 dist_man8_MANS = man/keychain-pkcs11.man
 check_PROGRAMS = pkcs11_test pktest
+noinst_PROGRAMS = sectest
 
 keychain_pkcs11_la_SOURCES = \
 			src/keychain_pkcs11.c \
@@ -67,6 +68,26 @@ pktest_SOURCES = \
 ##
 pkcs11_test_CFLAGS = $(AM_CFLAGS)
 pktest_CFLAGS = $(AM_CFLAGS)
+
+##
+## This is a test program used to debug the Apple Security framework, but
+## it's not used by the test suite.  So build it but never install it
+##
+
+sectest_SOURCES = \
+		test/sectest.c \
+		src/localauth.m \
+		#
+
+sectest_LDFLAGS = \
+		-g \
+		-framework Security \
+		-framework LocalAuthentication \
+		-framework CoreFoundation \
+		#
+
+sectest_OBJCFLAGS = -g
+sectest_CFLAGS = -g
 
 ##
 ## Extra files that need to appear in our distribution that Automake won't

@@ -35,6 +35,7 @@
 # Removed my mostlyclean
 /pkcs11_test
 /pktest
+/sectest
 *.o
 *.la
 *.lo
