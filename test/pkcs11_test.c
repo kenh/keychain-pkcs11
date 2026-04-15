@@ -562,10 +562,10 @@ int main(int argc, char *argv[]) {
 		"is valid\n");
     }
 
-    if (slotList) free(slotList);
-
     if (slot == -1)
 	slot = slotList[0];
+
+    if (slotList) free(slotList);
 
     memset(&sInfo, 0, sizeof(sInfo));
     if (p11p->C_GetSlotInfo) {
