@@ -378,10 +378,10 @@ static void sess_free(struct session *);
 #define CHECKSESSION(session, var) \
 do { \
 	LOCK_MUTEX(sess_mutex); \
-	session--; \
-	if (session >= sess_list_count || sess_list[session] == NULL) { \
+	if (session-- == 0 || session >= sess_list_count || sess_list[session] == NULL) { \
 		os_log_debug(logsys, "Session handle %lu is invalid, " \
-			     "returning CKR_SESSION_HANDLE_INVALID", session); \
+			     "returning CKR_SESSION_HANDLE_INVALID", \
+			     session + 1); \
 		UNLOCK_MUTEX(sess_mutex); \
 		return CKR_SESSION_HANDLE_INVALID; \
 	} \
