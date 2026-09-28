@@ -249,6 +249,7 @@ usage(const char *progname)
     fprintf(stderr, "\t\t\t%%o\tObject number\n");
     fprintf(stderr, "\t\t\t%%a\tAttribute number\n");
     fprintf(stderr, "\t\t\t%%s\tSlot number\n");
+    fprintf(stderr, "\t-l\t\tForce login to card\n");
     fprintf(stderr, "\t-L\t\tDo NOT log into card using C_Login\n");
     fprintf(stderr, "\t-N num\t\tSign <num> bytes of NULs (may be "
     		    "repeated)\n");
@@ -1489,8 +1490,8 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
 
     (void)fgets((char *)pass, (int)*length, stdin);
     cp = strchr((char *)pass, '\n');
-    if (cp) *cp = (char)NULL;
-    else pass[*length - 1] = (char)NULL;
+    if (cp) *cp = '\0';
+    else pass[*length - 1] = '\0';
 
     *length = (CK_ULONG)strlen((char *)pass);
 
