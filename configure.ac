@@ -8,6 +8,7 @@ AC_PREREQ([2.68])
 AC_INIT([keychain-pkcs11], [1.1.0], [kenh@cmf.nrl.navy.mil])
 AC_CONFIG_SRCDIR([src/keychain_pkcs11.c])
 AC_CONFIG_MACRO_DIRS([m4])
+AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([-Wall foreign subdir-objects 1.14])
 AC_PROG_CC([clang])
 AC_PROG_OBJC([clang])
@@ -32,5 +33,5 @@ AC_SUBST([APPIDENTIFIER])
 AC_CONFIG_FILES([Makefile packaging/distribution.xml]
 		[packaging/resources/welcome.rtf:packaging/resources/welcome-in.rtf])
 
-AC_CONFIG_HEADER([include/config.h])
+AC_CONFIG_HEADERS([include/config.h])
 AC_OUTPUT
