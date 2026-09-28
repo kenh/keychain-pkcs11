@@ -48,6 +48,13 @@ static void dump_object_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
 			     CK_OBJECT_HANDLE, CK_OBJECT_CLASS);
 
 /*
+ * Dump public key info
+ */
+
+static void dump_pubkey_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+			     CK_OBJECT_HANDLE);
+
+/*
  * Write out one or more attributes of an object
  */
 
@@ -1031,6 +1038,7 @@ int main(int argc, char *argv[]) {
 			   &issuer_attr, (void *) NULL);
                 break;
 	    case CKO_PUBLIC_KEY:
+		dump_pubkey_info(p11p, hSession, phObject[i]);
 	    case CKO_PRIVATE_KEY:
 		dump_attrs(p11p, hSession, phObject[i], NULL, &id_attr,
 			   &keytype_attr, &genmech_attr, &allowedmech_attr,
@@ -1717,8 +1725,9 @@ dump_object_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 	    dump_attrs(p11p, session, obj, classhint, &app_attr,
 		       &objid_attr, &value_attr, (void *) NULL);
 	    break;
-	case CKO_PUBLIC_KEY:
 	case CKO_PRIVATE_KEY:
+		dump_pubkey_info(p11p, session, obj);
+	case CKO_PUBLIC_KEY:
 	    dump_attrs(p11p, session, obj, classhint, &id_attr,
 		       &keytype_attr, &genmech_attr, &allowedmech_attr,
 		       &subject_attr, (void *) NULL);
@@ -1787,6 +1796,60 @@ dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
     va_end(ap);
 
     return rvret;
+}
+
+/*
+ * Retrieve a public key and return some information about it
+ */
+
+static void
+dump_pubkey_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
+		 CK_OBJECT_HANDLE obj)
+{
+    CK_ATTRIBUTE template[2];
+    int i, tcount = sizeof(template) / sizeof(template[0]);
+    CK_RV rv;
+
+    template[0].type = CKA_MODULUS;
+    template[1].type = CKA_PUBLIC_EXPONENT;
+
+    for (i = 0; i < tcount; i++) {
+	template[i].pValue = NULL;
+	template[i].ulValueLen = 0;
+    }
+
+    rv = p11p->C_GetAttributeValue(session, obj, template, tcount);
+
+    if (rv != CKR_OK) {
+	printf("Call to C_GetAttribteValue failed: %s (%d)\n",
+	       getCKRName(rv), (int) rv);
+	return;
+    }
+
+    for (i = 0; i < tcount; i++) {
+	template[i].pValue = malloc(template[i].ulValueLen);
+    }
+
+    rv = p11p->C_GetAttributeValue(session, obj, template, tcount);
+
+    if (rv != CKR_OK) {
+	printf("Second call to C_GetAttribteValue failed: %s (%d)\n",
+	       getCKRName(rv), (int) rv);
+	goto out;
+    }
+
+    for (i = 0; i < tcount; i++) {
+	printf("%s: %d bytes\n", getCKAName(template[i].type),
+	       (int) template[i].ulValueLen);
+	hexify_dump(template[i].pValue, template[i].ulValueLen);
+	putchar('\n');
+    }
+
+out:
+    for (i = 0; i < tcount; i++) {
+	if (template[i].pValue)
+	    free(template[i].pValue);
+    }
 }
 
 /*
