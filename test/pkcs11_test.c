@@ -262,6 +262,7 @@ usage(const char *progname)
 #endif
     fprintf(stderr, "\t-S signdata\tData to sign; requires -o, "
 		    "may be repeated\n");
+    fprintf(stderr, "\t-t\t\tRequest thread locking\n");
     fprintf(stderr, "\t-T\t\tAllow the use of slots WITHOUT tokens\n");
     fprintf(stderr, "\t-v filename\tFilename of data to verify signature;\n");
     fprintf(stderr, "\t\t\tuse -V for signature data and -o to select key\n");
@@ -303,6 +304,8 @@ int main(int argc, char *argv[]) {
     CK_OBJECT_HANDLE sObject = -1;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
     CK_MECHANISM mech = { sMech, NULL, 0 };
+    CK_VOID_PTR initArgsPtr = NULL;
+    CK_C_INITIALIZE_ARGS initArgs;
     const char *verify_data = NULL;
     const char *verify_sig = NULL;
     const char *attr_filename = NULL;
@@ -318,12 +321,13 @@ int main(int argc, char *argv[]) {
     bool forcenologin = false;
     bool requiretoken = true;
     bool waitslot = false;
+    bool threadlocking = false;
 
     struct attr_list *attr_head = NULL, *attr_tail = NULL, *attr;
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:Tv:V:wW")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:tTv:V:wW")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -459,6 +463,9 @@ int main(int argc, char *argv[]) {
 	    }
 
 	    break;
+	case 't':
+	    threadlocking = true;
+	    break;
 	case 'T':
 	    requiretoken = false;
 	    break;
@@ -502,7 +509,13 @@ int main(int argc, char *argv[]) {
         return(1);
     }
 
-    rv = p11p->C_Initialize(NULL);
+    if (threadlocking) {
+	memset(&initArgs, 0, sizeof(initArgs));
+	initArgs.flags = CKF_OS_LOCKING_OK;
+	initArgsPtr = &initArgs;
+    }
+
+    rv = p11p->C_Initialize(initArgsPtr);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error initalizing library (rv = %X)\n", (unsigned int) rv);
         return(2);
