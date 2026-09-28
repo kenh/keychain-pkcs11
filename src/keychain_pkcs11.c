@@ -3167,9 +3167,11 @@ add_identity(struct slot_entry *entry, CFDictionaryRef dict)
 	}
 
 	if ( !ret) {
-		ret = SecCertificateCopyPublicKey(id->cert, &id->pubkey);
-		if (ret)
-			LOG_SEC_ERR("CopyPublicKey failed: %{public}@", ret);
+		id->pubkey = SecCertificateCopyKey(id->cert);
+		if (! id->pubkey) {
+			os_log_debug(logsys, "Unable to retrieve public key");
+			ret = errSecItemNotFound;
+		}
 	}
 
 	/*
