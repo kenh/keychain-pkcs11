@@ -5,7 +5,7 @@ dnl
 
 AC_PREREQ([2.68])
 
-AC_INIT([keychain-pkcs11], [1.1.0], [kenh@cmf.nrl.navy.mil])
+AC_INIT([keychain-pkcs11], [1.1.1], [kenh@cmf.nrl.navy.mil])
 AC_CONFIG_SRCDIR([src/keychain_pkcs11.c])
 AC_CONFIG_MACRO_DIRS([m4])
 AC_CONFIG_AUX_DIR([build-aux])
