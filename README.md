@@ -43,7 +43,7 @@ The basic steps for getting using Keychain-PKCS11 are:
    installer package, found on the
    [GitHub release page](https://github.com/kenh/keychain-pkcs11/releases).
    That page includes signed installer packages that should work with
-   any version of MacOS X from High Sierra onwards.
+   any version of MacOS X from Mojave onwards.
 2. Configure your applications to use Keychain-PKCS11.  The library
    is installed in `/usr/local/lib/keychain-pkcs11.dylib`.  How each
    application is configured unfortunately varies by application.
